@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -336,12 +338,21 @@ def test_v2_sidecars_are_hash_pinned_and_forbid_aggregate_accuracy():
     assert schema["model_generated_review_allowed"] is False
 
 
-def _without_sqlite_writer_version(payloads: dict[str, bytes]) -> dict[str, bytes]:
-    # SQLite stamps the writing library's SQLITE_VERSION_NUMBER at header offset
-    # 96. The interpreter's SQLite, not uv.lock, decides it, so a rebuild on
-    # another Python differs from the checked fixture in those four bytes only.
-    sqlite = payloads["safety.sqlite"]
-    return {**payloads, "safety.sqlite": sqlite[:96] + sqlite[100:]}
+def _sqlite_content(path: Path) -> tuple[object, ...]:
+    uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        schema = connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name"
+        ).fetchall()
+        rows = {
+            name: connection.execute(
+                f'SELECT * FROM "{name}" ORDER BY rowid'
+            ).fetchall()
+            for kind, name, _, _ in schema
+            if kind == "table"
+        }
+        page_size = connection.execute("PRAGMA page_size").fetchone()
+    return schema, rows, page_size
 
 
 def test_final_tier3_fixtures_and_manifest_are_repeat_build_deterministic(
@@ -392,9 +403,21 @@ def test_final_tier3_fixtures_and_manifest_are_repeat_build_deterministic(
     second_manifest = hero_builder._manifest()
 
     assert first_payloads == second_payloads
-    assert _without_sqlite_writer_version(
-        first_payloads
-    ) == _without_sqlite_writer_version(checked_payloads)
+    # safety.sqlite comes from the interpreter's SQLite, which uv.lock does not
+    # pin, and SQLite versions differ in header and cell layout. Its checked
+    # sha256 stays pinned above; a rebuild must match its schema and rows.
+    assert {
+        name: payload
+        for name, payload in first_payloads.items()
+        if name != "safety.sqlite"
+    } == {
+        name: payload
+        for name, payload in checked_payloads.items()
+        if name != "safety.sqlite"
+    }
+    assert _sqlite_content(first_root / "safety.sqlite") == _sqlite_content(
+        evaluate.HERO_DIR / "safety.sqlite"
+    )
     assert first_manifest == second_manifest
     assert first_canaries == second_canaries == RAW_ONLY_CANARIES
 
