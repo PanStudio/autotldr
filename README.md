@@ -18,8 +18,8 @@ autotldr paper.pdf results.parquet analysis.ipynb --detail deep
 autotldr ./handoff --out html --budget 262144 -o brief.html
 ```
 
-**v0.2.0 is being prepared for release.** The CLI, configuration, and output schemas may
-evolve during 0.x development. [Release notes](docs/changelog.md) · [Try it](docs/try-it.md)
+**AutoTLDR is on [PyPI](https://pypi.org/project/autotldr/).** The CLI, configuration, and
+output schemas may evolve during 0.x development. [Release notes](docs/changelog.md) · [Try it](docs/try-it.md)
 
 ## Why AutoTLDR
 
@@ -40,6 +40,13 @@ evolve during 0.x development. [Release notes](docs/changelog.md) · [Try it](do
 Use **Python 3.12**, a Unix-like terminal (Linux, macOS, or WSL), and
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/). Python 3.12 is the
 qualified version for the complete optional parser set.
+
+From PyPI:
+
+```bash
+uv tool install --python 3.12 'autotldr[all]'
+autotldr --version
+```
 
 From a checkout:
 
@@ -65,7 +72,7 @@ autotldr formats
 
 `--model off` produces an evidence map. Ordinary commands use a configured model to write
 the prose brief. The [installation guide](docs/install-guide.md) also covers installing
-the exact wheel from a release bundle; no PyPI package publication is claimed yet.
+the exact wheel from a release bundle.
 
 ## Connect the AI
 

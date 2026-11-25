@@ -3,6 +3,17 @@
 Commands, configuration, and output schemas may evolve during 0.x development. Entries
 before 0.2.0 record development checkpoints.
 
+## 0.2.1 — published through PyPI Trusted Publishing — 2026-11-25
+
+- Releases are published by `.github/workflows/publish.yml`: a `v*` tag push checks that
+  the tag equals the package version, runs the acceptance suite, builds and audits the
+  artifacts, and uploads them over OIDC after the owner approves the `pypi` environment.
+- The Tier-3 rebuild test compares a rebuilt `safety.sqlite` by schema, rows and page size,
+  so a runner whose SQLite lays out cells differently still passes. The UTF-8 wire and
+  structured budget tests no longer depend on the runner's temporary path or user config.
+- The PanCode pack launches `uvx --from autotldr==0.2.1`.
+- The README states that AutoTLDR is on PyPI and shows the PyPI install.
+
 ## 0.2.0 — any OpenAI-compatible inference server — 2026-11-25
 
 - Replaced the LM Studio-only loopback transport with one OpenAI-compatible HTTP client.

@@ -9,7 +9,7 @@ or a URL and it returns what the thing *means*, rendered into the shape the
 caller asked for. `autotldr model.xlsx` returns the formula dependency graph, not
 a grid of numbers.
 
-Preparing v0.2.0, pending owner testing and approval. The thin
+Released on PyPI as `autotldr`. The thin
 Stage 1–8 MVP is complete. The same public pipeline now
 acquires a file/folder/archive/URL, fuses its addressable representation,
 optionally accepts strictly grounded model claims, and renders ANSI,
