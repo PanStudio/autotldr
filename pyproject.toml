@@ -60,8 +60,8 @@ packages = ["src/autotldr"]
 # docs/census draft must never enter a release merely because it exists in a checkout.
 [tool.hatch.build.targets.sdist]
 include = [
-  "LICENSE",
-  "README.md",
+  "/LICENSE",
+  "/README.md",
   "docs/*.md",
   "examples/*.py",
   "integrations/skills/autotldr/**",
