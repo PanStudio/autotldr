@@ -793,6 +793,32 @@ def test_a2a_is_not_advertised_without_a_real_server():
     assert not (ROOT / ".well-known" / "agent-card.json").exists()
 
 
+def test_pancode_pack_pins_this_release_and_classes_the_served_tool_read():
+    import tomllib
+
+    from autotldr._version import __version__
+
+    pack = ROOT / "pancode"
+    plugin = json.loads((pack / "plugin.json").read_text(encoding="utf-8"))
+    servers = json.loads((pack / "mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert (pack / "LICENSE").read_bytes() == (ROOT / "LICENSE").read_bytes()
+    assert plugin["version"] == __version__
+    assert plugin["license"] == project["project"]["license"]["text"] == "MIT"
+    assert plugin["description"] == project["project"]["description"]
+    assert list(servers) == ["autotldr"]
+    server = servers["autotldr"]
+    assert set(server) <= {"type", "command", "args", "timeoutMs", "toolActionClasses"}
+    assert server["command"] == "uvx"
+    args = server["args"]
+    assert args[:3] == ["--from", f"autotldr=={__version__}", "autotldr-mcp"]
+    assert "--refuse-hidden-sources" in args
+    parsed = mcp._parser().parse_args(args[3:])
+    assert parsed.refuse_hidden_sources is True
+    assert parsed.root == [Path("~")]
+    assert server["toolActionClasses"] == {mcp.TOOL_NAME: "read"}
+
+
 def test_skill_is_concise_instruction_only_and_has_required_ui_metadata():
     root = ROOT / "integrations" / "skills" / "autotldr"
     files = {
