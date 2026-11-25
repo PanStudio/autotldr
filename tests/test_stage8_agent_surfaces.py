@@ -459,6 +459,110 @@ def test_deferred_task_rechecks_roots_after_source_replacement(tmp_path, monkeyp
     assert record["result"]["isError"] is True
 
 
+def _assert_hidden_refused(response, root):
+    data = response["error"]["data"]
+    assert data["code"] == "INVALID_PARAMS"
+    assert "--refuse-hidden-sources" in data["detail"]
+    assert str(root) not in json.dumps(response)
+
+
+def test_refuse_hidden_sources_refuses_hidden_paths_and_symlinks_into_them(tmp_path):
+    root = tmp_path / "home"
+    (root / ".config").mkdir(parents=True)
+    (root / ".config" / "secret.md").write_text("# Key\n\nsecret material.\n")
+    (root / ".secret.md").write_text("# Key\n\nsecret material.\n")
+    (root / "visible.md").write_text("# Visible\n\nOrdinary evidence.\n")
+    (root / "link.md").symlink_to(root / ".config" / "secret.md")
+    (root / "linkdir").symlink_to(root / ".config", target_is_directory=True)
+    arguments = {"output": "json", "budget": 12_000}
+
+    guarded = mcp.MCPServer(roots=(root,), refuse_hidden_sources=True)
+    for source in (".secret.md", ".config/secret.md", "link.md", "linkdir",
+                   str(root / "visible.md" / ".." / ".secret.md")):
+        _assert_hidden_refused(
+            _tool_call(guarded, {"sources": [source], **arguments}), root
+        )
+    accepted = _tool_call(guarded, {"sources": ["visible.md"], **arguments})
+    assert accepted["result"]["isError"] is False
+
+    unguarded = mcp.MCPServer(roots=(root,))
+    for source in (".secret.md", "link.md"):
+        result = _tool_call(unguarded, {"sources": [source], **arguments})["result"]
+        assert result["isError"] is False
+        assert "secret material" in result["content"][0]["text"]
+
+
+def test_refuse_hidden_sources_accepts_a_hidden_root_itself(tmp_path):
+    root = tmp_path / ".project"
+    root.mkdir()
+    (root / "notes.md").write_text("# Notes\n\nRooted evidence.\n")
+    (root / ".inner.md").write_text("# Inner\n\nsecret material.\n")
+    server = mcp.MCPServer(roots=(root,), refuse_hidden_sources=True)
+    arguments = {"output": "json", "budget": 12_000}
+    accepted = _tool_call(server, {"sources": [str(root / "notes.md")], **arguments})
+    assert accepted["result"]["isError"] is False
+    _assert_hidden_refused(
+        _tool_call(server, {"sources": [".inner.md"], **arguments}), root
+    )
+
+
+def test_deferred_task_keeps_the_hidden_source_rule_it_was_created_with(
+    tmp_path, monkeypatch
+):
+    import autotldr.api as api
+
+    root = tmp_path / "home"
+    source = root / "collection"
+    source.mkdir(parents=True)
+    hidden = root / ".private"
+    hidden.mkdir()
+    monkeypatch.setattr(mcp, "_STORE", mcp._TaskStore(tmp_path / "tasks"))
+    monkeypatch.setattr(mcp, "_start_task_worker", lambda task_id: 1)
+    monkeypatch.setattr(api, "summarize_product", lambda *args, **kwargs: pytest.fail(
+        "a source made hidden escaped the task's hidden-source rule"))
+    server = mcp.MCPServer(roots=(root,), refuse_hidden_sources=True)
+    created = _tool_call(server, {"sources": [str(source)]}, tasks=True)["result"]
+    assert created["resultType"] == "task"
+    assert mcp._task_store().get(created["taskId"])["arguments"]["refuseHiddenSources"]
+    source.rmdir()
+    source.symlink_to(hidden, target_is_directory=True)
+    mcp._run_task(created["taskId"])
+    result = mcp._task_store().get(created["taskId"])["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["code"] == "INVALID_PARAMS"
+    assert "--refuse-hidden-sources" in result["structuredContent"]["error"]["message"]
+
+
+def test_task_record_without_the_hidden_source_key_runs_with_the_rule_off(
+    tmp_path, monkeypatch
+):
+    import autotldr.api as api
+
+    root = tmp_path / "home"
+    source = root / "collection"
+    source.mkdir(parents=True)
+    hidden = root / ".private"
+    hidden.mkdir()
+    reached = []
+    monkeypatch.setattr(mcp, "_STORE", mcp._TaskStore(tmp_path / "tasks"))
+    monkeypatch.setattr(mcp, "_start_task_worker", lambda task_id: 1)
+
+    def summarize(sources, **kwargs):
+        reached.extend(sources)
+        raise RuntimeError("stop after authorization")
+
+    monkeypatch.setattr(api, "summarize_product", summarize)
+    server = mcp.MCPServer(roots=(root,), refuse_hidden_sources=True)
+    created = _tool_call(server, {"sources": [str(source)]}, tasks=True)["result"]
+    record = mcp._task_store().get(created["taskId"])
+    older = {k: v for k, v in record["arguments"].items() if k != "refuseHiddenSources"}
+    mcp._task_store().update(created["taskId"], arguments=older)
+    source.rmdir()
+    source.symlink_to(hidden, target_is_directory=True)
+    mcp._run_task(created["taskId"])
+    assert reached == [str(hidden)]
+
+
 @pytest.mark.parametrize("method", ["tasks/get", "tasks/cancel", "tasks/update"])
 def test_task_access_cannot_cross_server_roots(tmp_path, monkeypatch, method):
     root = tmp_path / "allowed"

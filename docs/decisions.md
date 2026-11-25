@@ -10,6 +10,37 @@ that names the entry it replaces.
 
 ---
 
+## 2026-11-25 · Hidden sources at an MCP launch
+
+### D-057 · An MCP launch can refuse hidden sources
+
+**Decided.** `autotldr-mcp` and `autotldr mcp` accept `--refuse-hidden-sources`. When it is
+set, a source is refused when its resolved path has any component that starts with `.`
+below the most specific root that contains it; the root itself may be hidden. Because
+the check reads the resolved path, a visible symlink into a dot directory is refused as
+well. The refusal is the ordinary invalid-params error, and its message names the rule,
+never the path or its contents. The setting is part of the server's authority: it is
+stored in each deferred task's arguments beside `authorizedRoots` and applied again when
+the task executes (D-053). A task record written without the key runs with the rule off.
+Without the flag nothing changes.
+
+**Why.** A host that cannot name the user's project, such as a PanCode plugin pack whose
+arguments are fixed text, can only root the server at a fixed path or at `~`. Directory
+walks already skip hidden children and never follow symlinks, but an explicitly named
+hidden source is accepted, so a `~` root would let a model ask for `~/.ssh/id_ed25519` or
+a credentials file under `~/.config`. Dot directories are where such material lives.
+
+**Rejected.** A path-argument declaration in the host, PanCode's `toolPathArguments`: it
+checks string arguments only and refuses a call whose declared argument is not a string,
+so declaring the `sources` array would refuse every call. A denylist of credential
+directories: it is never complete, differs per tool and platform, and fails open on the
+first directory it does not name.
+
+**Consequences.** A server started with the flag can read any visible file under its
+roots and nothing below a dot-named directory. An operator who needs a hidden tree roots
+the server at that tree. The rule judges paths, not contents; a secret kept in a visible
+file is still readable under a broad root.
+
 ## 2026-09-17 · Inference borrowed from any OpenAI-compatible server
 
 ### D-056 · One OpenAI-compatible transport replaces the loopback runtime profiles

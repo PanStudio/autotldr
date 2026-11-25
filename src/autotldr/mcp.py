@@ -118,6 +118,14 @@ class _InvalidParams(ValueError):
     pass
 
 
+class _HiddenSourceRefused(_InvalidParams):
+    def __init__(self) -> None:
+        super().__init__(
+            "a source resolves to a hidden path below its MCP root; this server "
+            "was started with --refuse-hidden-sources"
+        )
+
+
 class _InvalidRequest(ValueError):
     pass
 
@@ -235,9 +243,15 @@ class _TaskStore:
 class MCPServer:
     """Small JSON-RPC dispatcher with modern and legacy MCP eras."""
 
-    def __init__(self, roots: tuple[Path, ...] | None = None) -> None:
+    def __init__(
+        self,
+        roots: tuple[Path, ...] | None = None,
+        *,
+        refuse_hidden_sources: bool = False,
+    ) -> None:
         self._legacy_initialized = False
         self._roots = _configured_roots() if roots is None else _validate_roots(roots)
+        self._refuse_hidden_sources = refuse_hidden_sources
 
     def handle(self, message: Any) -> dict[str, Any] | None:
         request_id: Any = None
@@ -364,7 +378,11 @@ class MCPServer:
             )
             if params["name"] != TOOL_NAME:
                 raise _MethodNotFound(f"unknown tool {params['name']!r}")
-            arguments = _validate_arguments(params.get("arguments", {}), self._roots)
+            arguments = _validate_arguments(
+                params.get("arguments", {}),
+                self._roots,
+                refuse_hidden_sources=self._refuse_hidden_sources,
+            )
             if _should_defer(arguments["sources"]) and _supports_tasks(meta):
                 return _create_task(arguments)
             return _execute_tool(arguments)
@@ -426,7 +444,11 @@ class MCPServer:
             if params["name"] != TOOL_NAME:
                 raise _MethodNotFound(f"unknown tool {params['name']!r}")
             result = _execute_tool(
-                _validate_arguments(params.get("arguments", {}), self._roots)
+                _validate_arguments(
+                    params.get("arguments", {}),
+                    self._roots,
+                    refuse_hidden_sources=self._refuse_hidden_sources,
+                )
             )
             return _legacy_tool_result(result)
         raise _MethodNotFound(method)
@@ -490,7 +512,10 @@ def _require_task_capability(meta: dict[str, Any]) -> None:
 
 
 def _validate_arguments(
-    arguments: Any, roots: tuple[Path, ...]
+    arguments: Any,
+    roots: tuple[Path, ...],
+    *,
+    refuse_hidden_sources: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise _InvalidParams("tool arguments must be an object")
@@ -528,7 +553,9 @@ def _validate_arguments(
             raise _InvalidParams(
                 "remote sources are not accepted by the local MCP surface"
             )
-    sources = _authorize_sources(tuple(sources), roots)
+    sources = _authorize_sources(
+        tuple(sources), roots, refuse_hidden_sources=refuse_hidden_sources
+    )
     output = arguments.get("output", _DEFAULT_OUTPUT)
     if not isinstance(output, str) or output not in {"ansi", "md", "json", "jsonl"}:
         raise _InvalidParams("output must be one of ansi, md, json, or jsonl")
@@ -560,6 +587,7 @@ def _validate_arguments(
         "mode": mode,
         "allowEvidenceFallback": fallback,
         "authorizedRoots": [str(root) for root in roots],
+        "refuseHiddenSources": refuse_hidden_sources,
     }
 
 
@@ -585,7 +613,10 @@ def _configured_roots() -> tuple[Path, ...]:
 
 
 def _authorize_sources(
-    sources: tuple[str, ...], roots: tuple[Path, ...]
+    sources: tuple[str, ...],
+    roots: tuple[Path, ...],
+    *,
+    refuse_hidden_sources: bool = False,
 ) -> tuple[str, ...]:
     authorized: list[str] = []
     for source in sources:
@@ -606,8 +637,20 @@ def _authorize_sources(
                     "use an absolute path when roots are ambiguous"
                 )
             resolved = matches[0]
-        if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
+        containing = [
+            root
+            for root in roots
+            if resolved == root or resolved.is_relative_to(root)
+        ]
+        if not containing:
             raise _InvalidParams("a source resolves outside the configured MCP roots")
+        if refuse_hidden_sources:
+            # Judge the resolved path below the most specific root, so a
+            # deliberately hidden root stays usable while a visible symlink
+            # into a dot directory is still refused.
+            root = max(containing, key=lambda item: len(item.parts))
+            if any(part.startswith(".") for part in resolved.relative_to(root).parts):
+                raise _HiddenSourceRefused
         authorized.append(str(resolved))
     if len(set(authorized)) != len(authorized):
         raise _InvalidParams("sources resolve to duplicate paths")
@@ -620,9 +663,11 @@ def _execute_tool(arguments: dict[str, Any]) -> dict[str, Any]:
 
         # Deferred tasks can begin after a source path has been replaced.
         # Persist the creating server's authority and re-resolve at execution.
+        # A record written before refuseHiddenSources existed runs with it off.
         sources = _authorize_sources(
             tuple(arguments["sources"]),
             tuple(Path(root) for root in arguments["authorizedRoots"]),
+            refuse_hidden_sources=arguments.get("refuseHiddenSources") is True,
         )
         result = summarize_product(
             sources,
@@ -689,6 +734,8 @@ def _effective_product_fields(
 
 def _named_tool_error(exc: Exception) -> tuple[str, str]:
     name = type(exc).__name__
+    if isinstance(exc, _HiddenSourceRefused):
+        return "INVALID_PARAMS", str(exc)
     if isinstance(exc, FileNotFoundError):
         return "SOURCE_NOT_FOUND", "A requested local source was not found."
     if isinstance(exc, PermissionError):
@@ -992,9 +1039,13 @@ def _now_ms() -> int:
 
 
 def serve(
-    stdin: BinaryIO, stdout: BinaryIO, *, roots: tuple[Path, ...] = ()
+    stdin: BinaryIO,
+    stdout: BinaryIO,
+    *,
+    roots: tuple[Path, ...] = (),
+    refuse_hidden_sources: bool = False,
 ) -> None:
-    server = MCPServer(roots=roots)
+    server = MCPServer(roots=roots, refuse_hidden_sources=refuse_hidden_sources)
     while True:
         line = stdin.readline(_MAX_MESSAGE_BYTES + 1)
         if not line:
@@ -1050,16 +1101,7 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if len(argv) == 2 and argv[0] == "--run-task":
-        try:
-            _validate_task_id(argv[1])
-        except _InvalidParams:
-            return 2
-        _run_task(argv[1])
-        return 0
-
+def _parser():
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -1074,12 +1116,39 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DIRECTORY",
         help="authorize one local source tree; repeat for additional roots",
     )
+    parser.add_argument(
+        "--refuse-hidden-sources",
+        action="store_true",
+        help=(
+            "refuse a source whose resolved path has a dot-named component "
+            "below its root; the root itself may be hidden"
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) == 2 and argv[0] == "--run-task":
+        try:
+            _validate_task_id(argv[1])
+        except _InvalidParams:
+            return 2
+        _run_task(argv[1])
+        return 0
+
+    parser = _parser()
     args = parser.parse_args(argv)
     try:
         roots = _validate_roots(tuple(args.root))
     except ValueError as exc:
         parser.error(str(exc))
-    serve(sys.stdin.buffer, sys.stdout.buffer, roots=roots)
+    serve(
+        sys.stdin.buffer,
+        sys.stdout.buffer,
+        roots=roots,
+        refuse_hidden_sources=args.refuse_hidden_sources,
+    )
     return 0
 
 
