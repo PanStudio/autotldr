@@ -260,3 +260,5 @@ The [first-user study](docs/first-user-validation.md) remains a follow-up learni
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Part of Anthony Kougkas's agentic engineering work: [akougkas.io/work/agentic-engineering](https://akougkas.io/work/agentic-engineering/)
