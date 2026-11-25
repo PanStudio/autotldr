@@ -7,12 +7,17 @@ fused context bundle.
 **Implementation status:** the complete thin Stage 1–8 MVP is implemented. One public
 pipeline acquires files, folders, archives, stdin, and URLs; normalizes every supported
 input into the same addressable representation; applies the measured role/fusion policy;
-accepts strictly ID-grounded local-model claims in the ordinary product path; and renders
+accepts strictly ID-grounded model claims in the ordinary product path; and renders
 six output shapes. Watch, root-scoped MCP, and the installable Agent Skill wrap that
 pipeline. A2A is deliberately absent until a real server and authorization design exist.
 The software gate is complete; independent physical proof of zero CPU spill remains
 unavailable from the current LM Studio/process telemetry and is reported separately rather
 than invented.
+
+**Release update (2026-09-17):** v0.2.0 is prepared for owner acceptance under D-055.
+D-056 replaces the loopback runtime profiles with one OpenAI-compatible server connection,
+so inference can come from any reachable homelab node or gateway. It does not rewrite the
+historical LM Studio/ZBook evaluations below. See `try-it.md` for the current setup.
 
 This document makes the stack decisions and the representation concrete. It supersedes
 nothing in [`matrix.md`](matrix.md); the matrix is the menu, this is what we cook
@@ -41,7 +46,7 @@ by default.
 Stage 3 processes one acquired source. Stage 4 fuses two or more sources. Stage 5 adds
 bounded directory/repository/archive/doc-site acquisition, the locked Tier 3 adapters,
 and the public grounded-synthesis seam. Ordinary CLI invoke now requires an explicitly
-configured loopback model and returns validated cited prose. Deterministic extraction is
+configured model server and returns validated cited prose. Deterministic extraction is
 an explicit `--model off` evidence mode, not a prose-shaped silent fallback.
 
 | Concern | Implemented contract |

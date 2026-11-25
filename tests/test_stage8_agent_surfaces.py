@@ -245,7 +245,7 @@ def test_mcp_default_prose_fails_actionably_without_a_configured_model(
     )["result"]
 
     assert response["isError"] is True
-    assert response["structuredContent"]["error"]["code"] == "LOCAL_MODEL_UNAVAILABLE"
+    assert response["structuredContent"]["error"]["code"] == "MODEL_UNAVAILABLE"
 
 
 def test_mcp_reports_effective_product_mode_and_detail(tmp_path, monkeypatch):
@@ -434,6 +434,109 @@ def test_task_methods_require_per_request_capability_and_use_current_methods():
         server, "tasks/result", {"taskId": "A" * 32, "_meta": _meta(tasks=True)}
     )
     assert obsolete["error"]["code"] == -32601
+
+
+def test_deferred_task_rechecks_roots_after_source_replacement(tmp_path, monkeypatch):
+    import autotldr.api as api
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    source = root / "collection"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(mcp, "_STORE", mcp._TaskStore(tmp_path / "tasks"))
+    monkeypatch.setattr(mcp, "_start_task_worker", lambda task_id: 1)
+    monkeypatch.setattr(api, "summarize_product", lambda *args, **kwargs: pytest.fail(
+        "replaced source escaped deferred task root authority"))
+    server = mcp.MCPServer(roots=(root,))
+    created = _tool_call(server, {"sources": [str(source)]}, tasks=True)["result"]
+    assert created["resultType"] == "task"
+    source.rmdir()
+    source.symlink_to(outside, target_is_directory=True)
+    mcp._run_task(created["taskId"])
+    record = mcp._task_store().get(created["taskId"])
+    assert record["result"]["isError"] is True
+
+
+@pytest.mark.parametrize("method", ["tasks/get", "tasks/cancel", "tasks/update"])
+def test_task_access_cannot_cross_server_roots(tmp_path, monkeypatch, method):
+    root = tmp_path / "allowed"
+    other = tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    monkeypatch.setattr(mcp, "_STORE", mcp._TaskStore(tmp_path / "tasks"))
+    monkeypatch.setattr(mcp, "_start_task_worker", lambda task_id: 1)
+    owner = mcp.MCPServer(roots=(root,))
+    created = _tool_call(owner, {"sources": [str(root)]}, tasks=True)["result"]
+    params = {"taskId": created["taskId"], "_meta": _meta(tasks=True)}
+    if method == "tasks/update":
+        params["inputResponses"] = {}
+    response = _request(mcp.MCPServer(roots=(other,)), method, params)
+    assert response["error"]["code"] == -32602
+    assert "outside" in response["error"]["data"]["detail"]
+
+
+def test_retargeting_source_cannot_transfer_an_existing_task_result(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    public = tmp_path / "public"
+    private.mkdir()
+    public.mkdir()
+    source = private / "source"
+    source.mkdir()
+    monkeypatch.setattr(mcp, "_STORE", mcp._TaskStore(tmp_path / "tasks"))
+    monkeypatch.setattr(mcp, "_start_task_worker", lambda task_id: 1)
+    owner = mcp.MCPServer(roots=(private,))
+    created = _tool_call(owner, {"sources": [str(source)]}, tasks=True)["result"]
+    mcp._task_store().update(created["taskId"], status="completed", result={"private": True})
+    source.rmdir()
+    source.symlink_to(public, target_is_directory=True)
+    params = {"taskId": created["taskId"], "_meta": _meta(tasks=True)}
+    rejected = _request(mcp.MCPServer(roots=(public,)), "tasks/get", params)
+    assert rejected["error"]["code"] == -32602
+    assert _request(owner, "tasks/get", params)["result"]["result"] == {"private": True}
+
+
+@pytest.mark.parametrize("field", ["mode", "detail", "output"])
+def test_unhashable_options_are_invalid_params(tmp_path, field):
+    response = _tool_call(
+        mcp.MCPServer(roots=(tmp_path,)),
+        {"sources": ["notes.md"], field: {}},
+    )
+    assert response["error"]["code"] == -32602
+
+
+@pytest.mark.parametrize("bad_line", [
+    b"[" * 10_000 + b"]" * 10_000,
+    b'{"jsonrpc":"2.0","id":NaN,"method":"ping"}',
+    b'{"jsonrpc":"2.0","id":1,"id":2,"method":"ping"}',
+    b'{"id":' + b"1" * 5000 + b"}",
+], ids=["deep-json", "nonfinite-number", "duplicate-key", "oversized-integer"])
+def test_stdio_contains_invalid_json_and_continues(tmp_path, bad_line):
+    from io import BytesIO
+
+    good = json.dumps({
+        "jsonrpc": "2.0", "id": "still-alive", "method": "ping",
+        "params": {"_meta": _meta()},
+    }).encode()
+    output = BytesIO()
+    mcp.serve(BytesIO(bad_line + b"\n" + good + b"\n"), output, roots=(tmp_path,))
+    responses = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert responses[0]["error"]["code"] == -32700
+    assert responses[1]["id"] == "still-alive"
+    assert "result" in responses[1]
+
+
+def test_stdio_can_echo_an_escaped_surrogate_request_id(tmp_path):
+    from io import BytesIO
+
+    request = json.dumps({
+        "jsonrpc": "2.0", "id": "\ud800", "method": "ping",
+        "params": {"_meta": _meta()},
+    }).encode()
+    output = BytesIO()
+    mcp.serve(BytesIO(request + b"\n"), output, roots=(tmp_path,))
+    assert json.loads(output.getvalue())["id"] == "\ud800"
 
 
 def test_unsupported_modern_version_is_a_named_mcp_error():

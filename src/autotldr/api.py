@@ -293,7 +293,7 @@ def apply_product_synthesis(
     """Apply the first-user synthesis contract to one acquired representation.
 
     This is the shared policy seam for the CLI and agent surfaces.  ``mode='prose'``
-    requires the explicitly configured loopback model; ``mode='evidence'`` records a
+    requires the explicitly configured model server; ``mode='evidence'`` records a
     clearly labelled model-off run.  It never owns model loading or residency.
     """
 
@@ -328,11 +328,12 @@ def apply_product_synthesis(
         }
         return extraction, None
 
-    from .product import require_active_model, require_configured_model
-    from .synthesis import EndpointPolicy, SynthesisConfig, synthesize
+    from .product import require_configured_model, require_model_available
+    from .synthesis import SynthesisConfig, synthesize
 
     model = require_configured_model(config)
-    require_active_model(model)
+    if client is None:
+        require_model_available(model)
     wrapped_single = extraction.kind != "collection"
     synthesis_input = (
         assemble_collection((extraction,), subject=extraction.source)
@@ -343,12 +344,10 @@ def apply_product_synthesis(
         synthesis_input,
         SynthesisConfig(
             model=model.model,
-            endpoint=model.endpoint,
-            endpoint_policy=EndpointPolicy(),
+            endpoint=model.base_url,
+            api_key=None if client is not None else model.api_key(),
             evidence_budget_bytes=detail_profile.evidence_budget_bytes,
-            timeout_seconds=min(
-                float(model.timeout_seconds), detail_profile.timeout_seconds
-            ),
+            timeout_seconds=float(model.timeout_seconds),
             max_output_tokens=detail_profile.max_output_tokens,
             max_claims=detail_profile.max_claims,
             reasoning_effort=detail_profile.reasoning_effort,
@@ -416,9 +415,11 @@ def summarize_product(
 
     resolved_config = product_config or load_product_config(use_config=use_config)
     if mode == "prose":
-        from .product import require_active_model, require_configured_model
+        from .product import require_configured_model, require_model_available
 
-        require_active_model(require_configured_model(resolved_config))
+        model = require_configured_model(resolved_config)
+        if client is None:
+            require_model_available(model)
     if registry is not None and resolved_config.extensions:
         raise ValueError(
             "an explicit registry cannot be combined with configured extension imports"

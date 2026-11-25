@@ -4,327 +4,248 @@
 
 <h1 align="center">AutoTLDR</h1>
 
-<p align="center"><strong>Point it at technical work. Get back what it means—with evidence.</strong></p>
+<p align="center"><strong>Understand technical work. Follow the evidence.</strong></p>
 
-AutoTLDR turns a file, mixed folder, archive, or documentation URL into a concise
-local-model brief. It reads each supported format on its own terms: an XLSX contributes
-its formula dependency graph, a database its schema, a scientific array its dimensions
-and units, code its symbols and imports, and prose its addressable structure. Every
-accepted prose claim links back to that native evidence.
+AutoTLDR turns a file, a mixed folder, an archive, or a documentation URL into a
+concise, cited brief. A spreadsheet contributes its formula dependencies; a database
+contributes its schema; scientific data contributes dimensions and units. A model then
+explains the selected evidence, with references you can follow back to the source.
 
-> **Status: pre-alpha.** The complete thin Stage 1–8 vertical slice exists and has a
-> successful live mixed-format proof, but the CLI, configuration, schemas, and supported
-> runtime profiles may change. This is being prepared for first users, not presented as a
-> stable release. See [What is proven](#what-is-proven) for the exact evidence boundary.
+```bash
+autotldr model.xlsx
+autotldr ./research --detail brief
+autotldr paper.pdf results.parquet analysis.ipynb --detail deep
+autotldr ./handoff --out html --budget 262144 -o brief.html
+```
 
-## Five-minute first run
+**v0.2.0 is being prepared for release.** The CLI, configuration, and output schemas may
+evolve during 0.x development. [Release notes](docs/changelog.md) · [Try it](docs/try-it.md)
 
-The complete `[all]` installation currently requires Python 3.12 and LM Studio listening
-on the local machine. It does not download, load, unload, or silently select a model.
-Load one intended generation model in LM Studio first. Other OpenAI-compatible local
-runtimes are transport candidates, not supported alpha runtimes, until they can prove the
-exact active model and pass the same conformance probe.
+## Why AutoTLDR
+
+- **Native meaning.** Read formulas, schemas, symbols, and scientific metadata in their
+  original formats instead of flattening everything into text.
+- **Evidence you can inspect.** Accepted claims cite existing evidence; AutoTLDR derives
+  their source locations and rejects unknown references and model substitutions.
+- **Visible gaps.** Missing documentation, unsupported inputs, and incomplete extraction
+  remain part of the result.
+- **An exact output budget.** The complete artifact fits the requested byte ceiling, with
+  an inventory of what was omitted. If it cannot fit, the command explains why.
+- **Your infrastructure.** Reading, extraction, and rendering run on your machine. Prose
+  comes from any OpenAI-compatible server you choose: LM Studio on your laptop, llama.cpp
+  on another node, or an authenticated gateway. Extraction also works without a model.
+
+## Install
+
+Use **Python 3.12**, a Unix-like terminal (Linux, macOS, or WSL), and
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/). Python 3.12 is the
+qualified version for the complete optional parser set.
 
 From a checkout:
 
 ```bash
+git clone https://github.com/akougkas/AutoTLDR.git
+cd AutoTLDR
 uv venv --python 3.12
-uv pip install -e ".[all]"
+uv pip install -e '.[all]'
+source .venv/bin/activate
+autotldr --version
 ```
 
-Configure the one model AutoTLDR should use. If LM Studio has exactly one active generation model,
-this is enough:
+If you already have the checkout, start at `uv venv`. The `[all]` extra installs every
+supported parser. The base package has no runtime dependencies; narrower installs can
+use the `office`, `pdf`, `code`, `structured`, `web`, or `data` extras.
+
+Check extraction immediately:
 
 ```bash
-autotldr setup
+autotldr README.md --model off --detail brief
+autotldr formats
+```
+
+`--model off` produces an evidence map. Ordinary commands use a configured model to write
+the prose brief. The [installation guide](docs/install-guide.md) also covers installing
+the exact wheel from a release bundle; no PyPI package publication is claimed yet.
+
+## Connect the AI
+
+AutoTLDR borrows inference from one OpenAI-compatible server and one exact model. Only
+the bounded evidence pack for a run is sent to that server; your files are read and
+rendered locally. AutoTLDR never downloads, loads, or swaps models.
+
+```bash
+# LM Studio, Ollama, or llama.cpp on this machine (the default base URL is LM Studio's)
+autotldr setup --model EXACT_MODEL_ID
+autotldr setup --base-url http://127.0.0.1:8080/v1 --model EXACT_MODEL_ID
+
+# A server elsewhere on your network
+autotldr setup --base-url http://inference-node:8080/v1 --model EXACT_MODEL_ID
+
+# An authenticated gateway such as LiteLLM; the key stays in your environment
+export LITELLM_API_KEY=...
+autotldr setup --base-url http://gateway:4000/v1 --api-key-env LITELLM_API_KEY \
+  --model node/EXACT_MODEL_ID
+
 autotldr doctor
 ```
 
-If several generation models are active, setup lists them and asks you to rerun with the exact ID:
+Setup reads the server's `/v1/models` catalog and refuses a model that is not listed.
+Without `--model`, it lists what the server offers. `doctor` sends one small synthetic
+request and reports whether the model returned an acceptable cited answer. To try a
+different model for one run, pass `--model OTHER_ID`; the configured server stays in force.
 
-```bash
-autotldr setup --model exact-active-model-id
-```
+Any server that implements chat completions with JSON-schema `response_format` works.
+Routers and gateways that load models on demand may make the first request slow, so
+setup's `--timeout` (default 120 seconds, maximum 300) applies to each model request.
+Use `https://` for servers you reach over untrusted networks.
 
-Setup considers only directly loaded local instances whose request ID exactly matches the
-LM Studio catalog key. Routed LM Link/Dynamo instances are ineligible and are never offered
-or invoked by the product path.
+## Use it
 
-Then point AutoTLDR at something real:
+### Choose how much explanation you need
 
-```bash
-autotldr model.xlsx
-autotldr ./experiment --detail brief
-autotldr paper.pdf results.parquet analysis.ipynb --detail deep
-autotldr ./handoff --detail standard --out html -o handoff.html
-```
-
-Ordinary invocation uses the configured local model and fails clearly if a valid cited
-answer cannot be produced. It never disguises a parser report as prose. To inspect the
-deterministic evidence without a model, ask for that mode explicitly:
-
-```bash
-autotldr model.xlsx --model off
-autotldr ./experiment --model off --out json
-```
-
-Run `autotldr formats` to see what this installation can actually read and which optional
-dependencies are missing. Run `autotldr doctor` whenever setup or a runtime changes.
-Doctor checks the exact catalog ID and sends one bounded synthetic grounding probe, so
-“ready” means more than “the port answered.” The probe contains no user source data and
-does not load or unload a model.
-
-`autotldr config show` prints the fully resolved settings and which files supplied them;
-`autotldr config paths` prints the user and project locations before either file exists.
-
-## One useful knob: detail
-
-Users choose the answer they need; AutoTLDR owns the provider settings behind it.
-
-| Detail | Best for | Initial bounded profile |
+| Detail | Useful for | Maximum prose claims |
 | --- | --- | --- |
-| `brief` | Quick orientation | Up to 2 cited claims, 8 KB evidence pack, compact visible evidence |
-| `standard` | Everyday understanding | Up to 4 cited claims, 24 KB evidence pack, broader supporting structure |
-| `deep` | Technical handoff or audit | Up to 6 cited claims, 48 KB evidence pack, complete visible selected evidence |
+| `brief` | A quick orientation | 2 |
+| `standard` | Everyday understanding; the default | 4 |
+| `deep` | A technical handoff or closer inspection | 6 |
 
-`standard` is the default. The detail level affects both what the model may see and how
-much supporting evidence human output presents. JSON and JSONL retain the complete
-budget-selected representation at every detail level. The alpha profiles disable hidden
-model reasoning for this constrained sentence-writing task and verify that LM Studio
-reports zero reasoning tokens; the generation allowance is reserved for cited prose and
-its full evidence IDs. Claim allowances are ceilings, not targets. Deeper profiles also
-receive a longer bounded deadline; users do not tune provider timeout knobs for ordinary
-invocation.
-
-`--budget N` is a separate hard ceiling over the complete rendered artifact. For text
-outputs, one portable token is exactly one UTF-8 byte under `utf8-byte-v1`; framing,
-citations, manifests, escaping, omission records, and the final newline all count. If the
-minimum valid addressable envelope cannot fit, AutoTLDR writes no partial result and exits
-with status 5.
-
-## What AutoTLDR understands
-
-| Input | Meaning extracted |
-| --- | --- |
-| XLSX/XLSM | Formula graph, dependencies, inputs, assumptions proven by structure, hardcoded values, circular references |
-| Parquet, SQLite, DuckDB | Schemas, columns, types, constraints, relationships, table/file statistics—not raw records |
-| HDF5, NetCDF, NumPy/NPZ, Arrow/Feather/ORC, FITS | Groups, arrays, shapes, dimensions, units, attributes, bounded metadata—not bulk values |
-| Markdown, text, structured data, source code | Addressable structure, definitions, symbols, imports, references, and proven roles |
-| PDF, DOCX, HTML, notebooks, LaTeX, EPUB | Native text-layer structure and addresses; scanned PDFs are declined by name |
-| Directories, repositories, ZIP/TAR archives, documentation sites | Bounded acquisition, per-member extraction, cross-source relationships, explicit partial declines |
-
-Native format support wins over conversion. `autotldr model.xlsx` explains the formula
-system; it does not flatten the workbook to Markdown. Missing rationale and unsupported
-members are findings, not invitations to invent an answer.
-
-The six core output shapes are ANSI, Markdown, self-contained HTML, linked PDF, JSON, and
-JSONL:
+These are ceilings, not padding targets. Detail controls the evidence available to the
+model and the supporting evidence shown in human output.
 
 ```bash
-autotldr report.pdf                         # terminal brief
-autotldr report.pdf -o report.md             # .md infers Markdown
-autotldr ./research -o brief.html            # .html infers self-contained HTML
-autotldr ./research -o brief.pdf             # .pdf infers linked PDF
-autotldr ./research --out json --budget 131072
-printf '# Notes\nhello\n' | autotldr - --type md --out jsonl
+autotldr ./experiment --detail brief
+autotldr model.xlsx --detail deep
+autotldr https://docs.example.org/guide --crawl --detail standard
 ```
 
-When `--out` is omitted, `-o` infers Markdown from `.md`/`.markdown`, HTML from
-`.html`/`.htm`, and PDF, JSON, or JSONL from their matching suffix. Stdout and unknown
-suffixes remain ANSI. An explicit `--out` always wins over the filename.
-
-Human output leads with “What matters,” then supporting native evidence, relationships,
-gaps, references, and a compact selection audit. Machine output includes the typed units,
-relations, gaps, grounded claims, complete origins, acquisition hashes, resolved product
-configuration, model outcome, and exact selection accounting.
-
-Watch mode keeps per-file briefs and a folder roll-up current using the same configured
-local prose and detail policy:
+### Save or share a result
 
 ```bash
-autotldr watch ./inbox --once --detail standard
-autotldr watch ./inbox --recursive --debounce 10 --detail brief
+autotldr report.pdf -o brief.md
+autotldr ./experiment --budget 262144 -o brief.html
+autotldr ./experiment --budget 1048576 -o brief.pdf
+autotldr ./experiment --out json --budget 262144 -o context.json
+printf '# Notes\nThe service stores events in SQLite.\n' | autotldr - --type md
+```
+
+The six output formats are **ANSI, Markdown, HTML, PDF, JSON, and JSONL**. A recognized
+output filename selects its format; `--out` overrides that inference. HTML is self-contained.
+JSON and JSONL preserve the complete budget-selected representation at every detail level.
+
+`--budget N` measures the **whole output in bytes**, including citations, formatting,
+metadata, and omission records: UTF-8 bytes for text, binary bytes for PDF. It is not the
+model's token count. Rich mixed-folder output and PDFs need larger budgets. If the required
+minimum cannot fit, exit status `5` names the measured minimum and no partial result is written.
+
+### Keep a folder brief current
+
+```bash
+autotldr watch ./inbox --once
+autotldr watch ./inbox --recursive --debounce 10
 autotldr watch ./inbox --status
 ```
 
-It suppresses unchanged content by SHA-256, contains per-file failures, stores status in
-SQLite/WAL, and publishes artifacts atomically below `.autotldr/`. Use `--model off`
-explicitly when a watched folder should produce evidence maps instead of prose TLDRs.
+Watch writes per-file briefs and a folder roll-up beneath `.autotldr/`. It reuses successful
+outputs when both the source and effective policy match. Missing outputs and failed work
+are retried on subsequent scans; failures remain visible in status and roll-up gaps.
 
-## Four alpha use cases
+## Supported inputs
 
-1. **Understand a technical handoff.** Brief a folder containing documentation, code,
-   notebooks, spreadsheets, and datasets without flattening them to one text blob.
-2. **Explain a workbook.** Identify formulas, inputs, outputs, dependencies, structural
-   assumptions, and dangerous hardcoded values with cell-level evidence.
-3. **Brief a research-data package.** Explain schema, dimensions, units, attributes,
-   provenance gaps, and relationships without putting bulk data into the model context.
-4. **Prepare grounded agent context.** Produce JSON under an exact byte ceiling while
-   preserving citations and a complete inventory of what the budget omitted.
+| Input | Native evidence |
+| --- | --- |
+| XLSX / XLSM | Formula dependencies, populated range interiors, structural inputs, hardcoded values, cycles |
+| Parquet, SQLite, DuckDB | Schemas, types, constraints, relationships, bounded statistics |
+| HDF5, NetCDF, NumPy / NPZ, Arrow, Feather, ORC, FITS | Shapes, dimensions, units, groups, attributes, metadata |
+| Markdown, text, JSON, YAML, TOML, XML, CSV, TSV | Addressable prose, structure, schemas, bounded tabular profiles |
+| Source code | Symbols, declarations, imports, and native source locations |
+| PDF, DOCX, HTML, notebooks, LaTeX, EPUB | Text-layer content and document structure |
+| Folders, Git worktrees, ZIP / TAR, documentation sites | Bounded acquisition, source outcomes, cross-file relationships |
 
-Generic meeting summaries, OCR, image/audio/video understanding, hosted inference, and a
-format marketplace are not alpha promises.
+`autotldr formats` is the authoritative inventory for your installation, including missing
+optional dependencies and named declines. Bulk dataset rows and arrays are not put into
+the model's evidence pack. Scanned PDFs, images, audio, and video are outside this release.
 
-## Configuration
+Spreadsheet extraction does not calculate formulas. Named ranges, table references,
+external references, dynamic targets, and unsupported reference expressions are reported
+at the affected formula instead of silently presenting a complete dependency graph.
 
-`autotldr setup` writes an owner-only user configuration at
-`$XDG_CONFIG_HOME/autotldr/config.toml`, or `~/.config/autotldr/config.toml` when XDG is
-not set. Set `AUTOTLDR_CONFIG` to use another user-config path. A project may add
-`.autotldr.toml` in its working directory.
-
-Precedence is: CLI flags, project configuration, user configuration, built-in defaults.
-`--no-config` ignores both files for a hermetic invocation. Configuration uses a closed,
-versioned TOML schema; unknown keys fail instead of being silently ignored.
-
-An initial project override can stay small:
-
-```toml
-version = 1
-
-[defaults]
-detail = "deep"
-allow_evidence_fallback = false
-```
-
-The alpha endpoint is exactly `http://127.0.0.1:1234`; setup uses it by default. AutoTLDR
-stores the `lm-studio` runtime type, an exact active model ID, endpoint, timeout, defaults,
-and explicit extension imports—never API secrets. Active LM Studio state prevents
-accidental auto-loading; it is still not an independent GPU-residency or zero-CPU-spill
-certification. That distinction is recorded rather than inferred.
-
-## Shell, Python, and agent use
-
-The shell command is the primary user and agent API. Quote paths and put `--` before them
-when a filename could be mistaken for an option:
+## Configuration and troubleshooting
 
 ```bash
-autotldr --detail brief --out json --budget 65536 -- "incoming/report.xlsx"
+autotldr doctor
+autotldr config show
+autotldr config paths
+autotldr formats
 ```
 
-Install the version-matched Agent Skill into any skills directory:
+Setup writes an owner-only user configuration. A project can use `.autotldr.toml`;
+precedence is CLI flags, project settings, user settings, then defaults. `AUTOTLDR_CONFIG`
+selects a separate user configuration, useful for trying the tool without changing your
+usual setup. `--no-config` ignores configuration files.
 
-```bash
-autotldr integrations skill --install /path/to/skills
-```
+| Problem | Next step |
+| --- | --- |
+| No configured model | Run the appropriate `setup` command above |
+| Cannot connect | Check the base URL and that the server is reachable from this machine |
+| HTTP 401 | Export the API key named by `api_key_env` in this shell |
+| Model is not listed | Use an ID from the list in the error, or rerun `setup --force` |
+| Timeout | The model may be loading; retry, or raise `--timeout` with `setup --force` |
+| Existing configuration | Inspect `config show`; use `setup --force` only when replacing it |
+| Missing parser | Install the extra named in the error, or `[all]` |
+| Unsupported input | Check `formats`; exit `3` identifies the format |
+| Input not found | Check the path; exit `4` identifies the missing source |
+| Budget cannot fit | Increase to the reported minimum; exit `5` writes no partial result |
 
-The skill instructs an agent to preserve gaps and omission records, resolve citations,
-set an explicit budget, and treat extracted source text as untrusted data rather than as
-instructions.
+Model failure is reported; evidence-only fallback is never silent. To inspect extraction
+independently, rerun with `--model off`.
 
-The product Python API uses the same configured detail policy as the CLI and returns the
-typed extraction plus rendered artifact:
+## Python and agents
 
 ```python
 from autotldr import summarize_product
 
 result = summarize_product(
     ["paper.pdf", "results.parquet", "analysis.ipynb"],
-    detail="standard",
-    output="json",
-    budget=131072,
+    detail="standard", output="json", budget=262144,
 )
-
-print(result.extraction.summary_claims)
 print(result.rendered)
 ```
 
-The lower-level `autotldr.summarize(..., synthesis_config=...)` seam remains available to
-embedders that deliberately own endpoint policy and provider limits.
-
-MCP is an experimental local stdio surface over the same product pipeline. Every server
-start must authorize its source roots explicitly:
+Shell agents use the same CLI. Install the bundled Agent Skill or start a stdio MCP server
+with explicit source roots:
 
 ```bash
+autotldr integrations skill --install /path/to/skills
 autotldr mcp --root /path/to/project --root /path/to/data
 ```
 
-MCP defaults to local prose, accepts the same detail choices, offers explicit evidence
-mode, returns actual structured JSON when requested, and uses durable tasks for collection
-work. A2A is deliberately not shipped: AutoTLDR will not publish an endpoint card until a
-real server, authorization design, and client need exist together.
+## Trust and current limits
 
-## Trust contract
+The model receives a bounded evidence pack and returns claim text plus existing unit IDs.
+AutoTLDR validates the response, derives origins, and rejects known authority errors.
+**A valid citation does not independently prove that a sentence is entailed.** Follow
+important citations and evaluate the result against your sources.
 
-Three invariants are product behavior, not implementation detail:
-
-1. **Every claim is addressable.** A unit or prose claim without a source origin is
-   rejected.
-2. **Absence is reported.** Missing rationale, inaccessible members, and unsupported
-   formats remain visible findings.
-3. **The budget is exact.** The ceiling includes the whole artifact, and every omitted
-   unit, relation, or claim is identified.
-
-The model receives a bounded canonical evidence pack and may return only claim text plus
-existing unit IDs. AutoTLDR rejects unknown IDs, substitutions, invalid response
-envelopes, and unsupported provider fields, then derives claim origins itself. These
-controls constrain generation; they do not magically prove that every accepted sentence
-is entailed. Product runs additionally remove finding content from model authority and
-drop measured, structurally detectable authority errors: behavior claimed from
-signature-only code evidence; concrete measurement units or number-unit quantities absent
-from every cited unit's content; and structured identifiers absent from their own claim's
-cited content. When cited prose explicitly distinguishes a same-named workbook cell from a
-declaration, the cell's derived-formula predicate cannot attach to the bare identifier.
-Model-profile quality and broader entailment are evaluated separately from protocol
-conformance.
-
-All heavy parsers are imported lazily. The base install has no dependencies, a Tier 0
-cold start is gated below 120 ms on an idle machine, input acquisition is bounded, URLs
-are HTTP(S)-only, and unsupported formats decline by name and owning tier.
-
-## What is proven
-
-The Stage 1–8 thin slice is implemented: one representation, measured role and fusion
-policies, Tiers 0–3, bounded collection acquisition, strict grounded local synthesis,
-watch mode, six output shapes, and local agent surfaces.
-
-On 2026-08-31, the live Borealis proof routed 14 mixed inputs through one ZBook-local
-Ornith-1.5-35B-A3B instance. It accepted three fully cited claims with no fallback and
-wrote all six output shapes plus a hash manifest from that single synthesis. Sixty-three
-independent checks over the saved artifacts passed. The localhost runtime could not
-independently attest actual per-layer GPU residency or zero CPU spill, so the result is
-correctly labelled a functional local-inference proof—not a residency certification.
-
-The frozen Stage 4 evaluation ships only fusion signals that cleared their preregistered
-precision and recall gates. Exact scores, rejected candidates, the guarded lifecycle,
-PDF reproducibility limits, and benchmark procedures live in
-[docs/decisions.md](docs/decisions.md) and [docs/spec-v1.md](docs/spec-v1.md); they are
-evidence for the product, not required onboarding.
+Native parsers run with your process permissions. Generated reports can contain source
+content and paths. Exact budgeting can be slow for large collections, and full provenance
+can consume substantial JSON or PDF space. See [security and data boundaries](docs/security.md)
+and the [audit](docs/public-alpha-audit.md) for the measured limits.
 
 ## Development
 
 ```bash
-uv venv --python 3.12
-uv pip install -e ".[all]"
+uv sync --locked --all-extras --dev
 uv run pytest
-uv run python -m autotldr.cli --version
+uv build
+uv run python scripts/check_release.py dist
 ```
 
-Use `uv venv --python 3.12` for the complete `[all]` developer install. The dependency-free
-base and all extras except `code` also run on Python 3.13; the code parser is held to 3.12
-by the available `tree-sitter-languages` wheel.
+The suite enforces lazy imports, a Tier 0 cold-start contract, warnings as errors, native
+parser behavior, source authority, grounded synthesis, exact budgets, and package contents.
 
-Warnings fail the build. Tier 0 cold start, lazy imports, deterministic projections,
-native parser safety, exact budgets, grounded synthesis, and package contents are all
-tested. CI runs the full suite and audits wheel/sdist contents; no published package is
-claimed yet.
-
-Read repository design material in this order:
-
-| Document | Purpose |
-| --- | --- |
-| [docs/vision.md](docs/vision.md) | Product thesis, audience, invariants, and non-goals |
-| [docs/product-alpha.md](docs/product-alpha.md) | First-user contract and alpha acceptance criteria |
-| [docs/private-alpha-guide.md](docs/private-alpha-guide.md) | Template rendered into the versioned participant bundle |
-| [docs/first-user-validation.md](docs/first-user-validation.md) | Preregistered private-alpha sessions, measures, and release gate |
-| [docs/spec-v1.md](docs/spec-v1.md) | Representation, technical decisions, and build order |
-| [docs/decisions.md](docs/decisions.md) | Append-only decisions, evidence, and rejected alternatives |
-| [docs/matrix.md](docs/matrix.md) | Long-horizon format and output inventory |
-| [docs/security.md](docs/security.md) | Filesystem, network, model, extension, and agent data boundaries |
-| [docs/changelog.md](docs/changelog.md) | Product-level changes during pre-alpha |
-
-The independent non-hero corpus builder, four-job procedure, and human claim-quality
-rubric live in [acceptance/](acceptance/README.md). They are release evidence, not shipped
-runtime data and not a replacement for sessions with users' own artifacts.
+Start with the [vision](docs/vision.md), [product contract](docs/product-alpha.md),
+[technical specification](docs/spec-v1.md), and [decision log](docs/decisions.md).
+The [first-user study](docs/first-user-validation.md) remains a follow-up learning plan.
 
 ## License
 

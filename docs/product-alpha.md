@@ -1,18 +1,22 @@
-# AutoTLDR alpha product contract
+# AutoTLDR first-release product contract
 
 This is the first-user contract. It describes the product we are building, not the
 incidental limits of the first two implementation days. The technical representation and
 evaluation record remain in `spec-v1.md` and `decisions.md`.
 
+The next release is **0.2.0**, pending hands-on acceptance (D-055). D-056 replaces the
+loopback runtime profiles with one OpenAI-compatible server connection. The four product
+jobs below remain the scope.
+
 ## The promise
 
 > Point AutoTLDR at a technical file, mixed folder, archive, or documentation URL and get
-> a concise local-model TLDR whose claims link back to native evidence.
+> a concise model-written TLDR whose claims link back to native evidence.
 
 AutoTLDR understands each supported format on its own terms. A spreadsheet contributes
 its formula graph, a database its schema and relationships, a scientific array its
 dimensions and attributes, a notebook its cell/output graph, code its symbols and
-imports, and prose its addressable structure. The local model writes over that evidence;
+imports, and prose its addressable structure. The model writes over that evidence;
 it does not replace extraction.
 
 ## The first user
@@ -73,37 +77,33 @@ Users choose the answer shape. AutoTLDR owns the provider settings needed to pro
 The targets are versioned product profiles, not promises about one model tokenizer. The
 final `--budget` remains a hard ceiling over the complete rendered artifact. When detail
 and budget conflict, the exact budget wins and the omission inventory says what was left
-out. The LM Studio alpha profiles disable hidden reasoning for constrained sentence
-writing and verify that the runtime reports zero reasoning tokens. Detail changes evidence,
+out. The model profiles disable hidden reasoning for constrained sentence writing. LM
+Studio must report zero reasoning tokens; llama.cpp rejects nonempty reasoning and records
+missing token telemetry as unreported. Detail changes evidence,
 claim, generation, and presentation allowances; it never grants hidden reasoning claim
 authority. Claim allowances are ceilings, not targets: the product prompt explicitly asks
 for fewer claims when additional prose would not add distinct supported meaning.
-The profiles also own bounded 60/90/120-second deadlines for brief/standard/deep; the
-configured model timeout is an upper cap, not another ordinary user-facing detail knob.
+The request deadline is the server's configured `timeout_seconds`, because on-demand
+loading on a remote node, not the detail level, dominates latency.
 
 Temperature, evidence bytes, response schema, and raw generation-token knobs are not
 public alpha settings. A later advanced profile must be justified by a measured model or
 use-case need rather than exposing provider internals preemptively.
 
-## Local model contract
+## Model server contract
 
-`autotldr setup` discovers active generation instances in LM Studio and writes one explicit
-named model profile. Ordinary invocation does not download a model, choose among multiple
-candidates, or mutate runtime residency. The first alpha certifies LM Studio because its
-local management API distinguishes downloaded catalog rows from active instances. Generic
-OpenAI-compatible endpoints remain future transport candidates until a provider adapter can
-prove active state and its observed response profile passes conformance.
+`autotldr setup` writes one explicit profile: an OpenAI-compatible `base_url`, an exact
+model name, an optional `api_key_env`, and a request timeout. The server may run on this
+machine or anywhere on the user's network, directly or behind a gateway. Setup and every
+prose run check that the server's `/models` catalog lists the configured model; `doctor`
+also sends one synthetic request. Ordinary invocation does not download, load, or choose
+a model. `--model ID` on a run overrides only the model name.
 
-An eligible directly loaded LM Studio instance must expose the same exact identifier as its
-catalog model key. A routed instance whose loaded ID differs from that key—including an LM
-Link/Dynamo row—is excluded from setup and fails the pre-acquisition active-model check.
-AutoTLDR does not invoke a route whose locality the provider inventory cannot attest.
-
-The manifest records the exact endpoint class, served model identity, resolved detail
-profile, evidence hash, response hash, validation result, and whether fallback was used.
-Schema-valid citations constrain a model; they do not by themselves prove entailment. The
-product evaluates supported model profiles on real tasks and states that evidence level
-separately from transport conformance.
+The manifest records the endpoint, transport implementation, whether a bearer key was
+used (never the key), served model identity, resolved detail profile, evidence hash,
+response hash, validation result, and whether fallback was used. Schema-valid citations
+constrain a model; they do not by themselves prove entailment. The product evaluates
+models on real tasks and states that evidence level separately from transport conformance.
 
 Findings are withheld from product claim input and remain visible as gaps because claims
 cannot cite finding IDs. Narrow deterministic product dispositions also drop a behavioral
@@ -117,8 +117,8 @@ recorded in the run audit. When cited prose explicitly distinguishes a same-name
 cell from a declaration, the cell's derived-formula predicate cannot be transferred to the
 bare identifier. These measured guardrails do not replace human entailment evaluation.
 
-Remote inference is off unless a later decision defines explicit authorization, privacy,
-credentials, and data-boundary behavior.
+The evidence pack for a run goes to the configured server. Choosing that server is the
+user's data-boundary decision.
 
 ## Evidence mode
 
@@ -175,19 +175,21 @@ discovery, structured results, and durable collection tasks over the same pipeli
 A2A card ships; actual A2A deployment waits for a real client need, server, and matching
 authorization design.
 
-## Alpha acceptance
+## Release acceptance
 
-The reproducible engineering procedure is `acceptance/README.md`; the external-user gate
-and preregistered measures are `docs/first-user-validation.md`. Invited participants
+The reproducible engineering procedure is `acceptance/README.md`. Publication of v0.2.0
+follows owner acceptance, exact-commit CI, and packaging checks (D-055). The external-user
+study and its preregistered measures remain in `docs/first-user-validation.md` as follow-up
+research; they have not been completed. Invited participants
 receive a version-bound, checksummed bundle whose guide names the support contact; they do
 not install from a mutable checkout. Privacy-safe session records are evaluated by the
 checked-in gate script rather than a retrospectively edited spreadsheet.
 
-The alpha is ready for first users when:
+The first release must demonstrate:
 
 - a clean Python 3.12 installation has one documented install path;
 - `doctor`, `setup`, and runtime-derived format discovery make failures actionable;
-- the ordinary command returns cited local-model prose for Tier 0–3 single files and mixed
+- the ordinary command returns cited model prose for Tier 0–3 single files and mixed
   folders;
 - `brief`, `standard`, and `deep` produce measurably different, bounded useful answers;
 - the four lead jobs have real, non-hero acceptance corpora;
@@ -196,5 +198,8 @@ The alpha is ready for first users when:
 - shell and root-scoped MCP agents cannot broaden source or model authority;
 - the full suite, packaging checks, warnings-as-errors, determinism checks, and startup
   gate pass in CI; and
-- first users beat a documented baseline on comprehension time or agent task quality at
-  equal context budget.
+- the owner has tested the concrete build and approved publication.
+
+The follow-up study measures whether first users beat a documented baseline on
+comprehension time or agent task quality at equal context budget. A release does not by
+itself establish that result.

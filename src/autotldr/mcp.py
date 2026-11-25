@@ -7,7 +7,7 @@ https://github.com/modelcontextprotocol/ext-tasks/blob/main/specification/2026-0
 Only the standard library is imported until a tool executes. This module does
 not load, unload, or select a model and exposes no network listener. Sources are
 confined to roots chosen when the server starts; prose uses the same configured
-local-model policy as the CLI.
+model-server policy as the CLI.
 Modern requests use MCP 2026-07-28 per-request metadata; a narrow synchronous
 2025-11-25 ``initialize`` fallback supports hosts from the prior protocol era.
 """
@@ -83,7 +83,7 @@ _TOOL_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["prose", "evidence"],
             "default": "prose",
-            "description": "Configured local-model prose, or explicit model-off evidence.",
+            "description": "Configured model prose, or explicit model-off evidence.",
         },
         "allowEvidenceFallback": {
             "type": "boolean",
@@ -102,7 +102,7 @@ _TOOL = {
     "title": "Summarize local sources with AutoTLDR",
     "description": (
         "Extract, fuse, and summarize root-scoped local files or collections with "
-        "exact origins, configured local-model prose, and a hard output budget."
+        "exact origins, configured model prose, and a hard output budget."
     ),
     "inputSchema": _TOOL_INPUT_SCHEMA,
     "annotations": {
@@ -370,11 +370,11 @@ class MCPServer:
             return _execute_tool(arguments)
         if method == "tasks/get":
             _require_task_capability(meta)
-            return _detailed_task(_task_store().get(_task_request(params)))
+            return _detailed_task(self._authorized_task(_task_request(params)))
         if method == "tasks/cancel":
             _require_task_capability(meta)
             task_id = _task_request(params)
-            record = _task_store().get(task_id)
+            record = self._authorized_task(task_id)
             if record["status"] == "working":
                 changes: dict[str, Any] = {"cancelRequested": True}
                 if record.get("phase") == "queued":
@@ -398,9 +398,21 @@ class MCPServer:
             task_id = _checked_task_id(params["taskId"])
             if not isinstance(params["inputResponses"], dict):
                 raise _InvalidParams("inputResponses must be an object")
-            _task_store().get(task_id)
+            self._authorized_task(task_id)
             return _complete()
         raise _MethodNotFound(method)
+
+    def _authorized_task(self, task_id: str) -> dict[str, Any]:
+        record = _task_store().get(task_id)
+        # These paths were canonicalized when the task was created. Re-resolving
+        # them could transfer an old private result to another root after a
+        # symlink replacement. Result ownership follows the original authority.
+        if any(
+            not any(Path(source).is_relative_to(root) for root in self._roots)
+            for source in record["arguments"]["sources"]
+        ):
+            raise _InvalidParams("task sources are outside the configured MCP roots")
+        return record
 
     def _dispatch_legacy(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method == "ping":
@@ -518,7 +530,7 @@ def _validate_arguments(
             )
     sources = _authorize_sources(tuple(sources), roots)
     output = arguments.get("output", _DEFAULT_OUTPUT)
-    if output not in {"ansi", "md", "json", "jsonl"}:
+    if not isinstance(output, str) or output not in {"ansi", "md", "json", "jsonl"}:
         raise _InvalidParams("output must be one of ansi, md, json, or jsonl")
     budget = arguments.get("budget", _DEFAULT_BUDGET)
     if (
@@ -530,10 +542,12 @@ def _validate_arguments(
             f"budget must be an integer between 1 and {_MAX_BUDGET}"
         )
     detail = arguments.get("detail")
-    if detail is not None and detail not in {"brief", "standard", "deep"}:
+    if detail is not None and (
+        not isinstance(detail, str) or detail not in {"brief", "standard", "deep"}
+    ):
         raise _InvalidParams("detail must be brief, standard, or deep")
     mode = arguments.get("mode", "prose")
-    if mode not in {"prose", "evidence"}:
+    if not isinstance(mode, str) or mode not in {"prose", "evidence"}:
         raise _InvalidParams("mode must be prose or evidence")
     fallback = arguments.get("allowEvidenceFallback")
     if "allowEvidenceFallback" in arguments and not isinstance(fallback, bool):
@@ -545,6 +559,7 @@ def _validate_arguments(
         "detail": detail,
         "mode": mode,
         "allowEvidenceFallback": fallback,
+        "authorizedRoots": [str(root) for root in roots],
     }
 
 
@@ -603,8 +618,14 @@ def _execute_tool(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         from .api import summarize_product
 
+        # Deferred tasks can begin after a source path has been replaced.
+        # Persist the creating server's authority and re-resolve at execution.
+        sources = _authorize_sources(
+            tuple(arguments["sources"]),
+            tuple(Path(root) for root in arguments["authorizedRoots"]),
+        )
         result = summarize_product(
-            arguments["sources"],
+            sources,
             detail=arguments["detail"],
             mode=arguments["mode"],
             allow_evidence_fallback=arguments["allowEvidenceFallback"],
@@ -694,10 +715,10 @@ def _named_tool_error(exc: Exception) -> tuple[str, str]:
             "MISSING_OPTIONAL_DEPENDENCY",
             f"{dependency} is unavailable; install autotldr[{extra}].",
         )
-    if name == "LocalModelUnavailable":
+    if name == "ModelUnavailable":
         return (
-            "LOCAL_MODEL_UNAVAILABLE",
-            "No configured loopback model is ready; run autotldr setup and doctor.",
+            "MODEL_UNAVAILABLE",
+            "The configured model server is not ready; run autotldr setup and doctor.",
         )
     if name in {
         "SynthesisError",
@@ -706,7 +727,7 @@ def _named_tool_error(exc: Exception) -> tuple[str, str]:
     }:
         return (
             "SYNTHESIS_FAILED",
-            "The local model did not produce an acceptable grounded response.",
+            "The configured model did not produce an acceptable grounded response.",
         )
     return (
         "PROCESSING_FAILED",
@@ -990,8 +1011,12 @@ def serve(
             )
         else:
             try:
-                message = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                message = json.loads(
+                    line,
+                    parse_constant=_reject_json_constant,
+                    object_pairs_hook=_unique_json_object,
+                )
+            except (ValueError, UnicodeDecodeError, RecursionError):
                 response = _error(
                     None,
                     -32700,
@@ -1004,12 +1029,25 @@ def serve(
         if response is not None:
             payload = (
                 json.dumps(
-                    response, ensure_ascii=False, separators=(",", ":")
+                    response, ensure_ascii=True, separators=(",", ":")
                 ).encode("utf-8")
                 + b"\n"
             )
             stdout.write(payload)
             stdout.flush()
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-JSON number: {value}")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

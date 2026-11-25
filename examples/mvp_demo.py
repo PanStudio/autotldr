@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Generate the complete AutoTLDR MVP demonstration artifact set.
 
-This script deliberately owns no model lifecycle. Run it only after the chosen
-model instance has been verified as ZBook-local and resident through the
-guarded lifecycle tooling. It performs one bounded evidence call against the
-fixed localhost endpoint, then renders that single accepted grounded extraction
-into all six MVP shapes without calling the model again.
+This script deliberately owns no model lifecycle. It performs one bounded
+evidence call against an OpenAI-compatible server, then renders that single
+accepted grounded extraction into all six MVP shapes without calling the model
+again.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -37,7 +37,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         required=True,
-        help="exact already-loaded ZBook-local LM Studio model instance ID",
+        help="exact model ID served at --base-url",
+    )
+    parser.add_argument(
+        "--base-url",
+        default="http://127.0.0.1:1234/v1",
+        help="OpenAI-compatible base URL (default: http://127.0.0.1:1234/v1)",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        help="environment variable holding the server's API key",
     )
     parser.add_argument(
         "--output-dir",
@@ -55,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
         "--timeout",
         type=float,
         default=120.0,
-        help="localhost model request timeout in seconds (default: 120)",
+        help="model request timeout in seconds (default: 120)",
     )
     parser.add_argument(
         "--max-output-tokens",
@@ -79,6 +88,8 @@ def generate(
     *,
     model: str,
     output_dir: Path,
+    base_url: str = "http://127.0.0.1:1234/v1",
+    api_key: str | None = None,
     evidence_budget: int = 12_000,
     timeout: float = 120.0,
     max_output_tokens: int = 4096,
@@ -88,7 +99,7 @@ def generate(
 
     Returns the manifest. ``client`` exists so the single-call and one-extraction
     invariants can be tested without a resident model; production leaves it None
-    and the strict loopback transport is constructed inside ``synthesize``.
+    and the HTTP transport is constructed inside ``synthesize``.
     """
 
     from autotldr.api import acquire
@@ -102,6 +113,8 @@ def generate(
 
     config = SynthesisConfig(
         model=model,
+        endpoint=base_url,
+        api_key=api_key,
         evidence_budget_bytes=evidence_budget,
         timeout_seconds=timeout,
         max_output_tokens=max_output_tokens,
@@ -166,8 +179,6 @@ def generate(
         "synthesis": {
             "model": model_run.get("model"),
             "endpoint": model_run.get("endpoint"),
-            "endpoint_class": model_run.get("endpoint_class"),
-            "endpoint_policy": model_run.get("endpoint_policy"),
             "transport": model_run.get("transport"),
             "settings": model_run.get("settings"),
             "outcome": model_run.get("outcome"),
@@ -215,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
             args.source,
             model=args.model,
             output_dir=args.output_dir,
+            base_url=args.base_url,
+            api_key=os.environ[args.api_key_env] if args.api_key_env else None,
             evidence_budget=args.evidence_budget,
             timeout=args.timeout,
             max_output_tokens=args.max_output_tokens,

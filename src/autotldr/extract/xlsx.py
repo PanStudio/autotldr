@@ -16,32 +16,36 @@ from collections import defaultdict
 from pathlib import Path
 
 import openpyxl
-from openpyxl.utils import get_column_letter
+from openpyxl.formula.tokenizer import Tokenizer, TokenizerError
+from openpyxl.utils import get_column_letter, range_boundaries
 
 from ..unit import Extraction, Modality, Origin, Relation, RelationKind, Role, Unit
 
-# Cell and range references, with optional sheet qualifier and $ anchors.
-_REF = re.compile(
-    r"(?:(?P<sheet>'[^']+'|[A-Za-z_][A-Za-z0-9_.]*)!)?"
-    r"(?P<start>\$?[A-Z]{1,3}\$?\d{1,7})"
-    r"(?::(?P<end>\$?[A-Z]{1,3}\$?\d{1,7}))?"
-)
-# A bare number inside a formula, ignoring those glued to a cell ref or an
-# exponent. These are the buried overrides worth surfacing.
-_LITERAL = re.compile(r"(?<![A-Za-z0-9_$.:])(\d+\.?\d*)(?![A-Za-z0-9_(])")
-_FUNC = re.compile(r"([A-Z][A-Z0-9.]{1,30})\s*\(")
+# A complete A1 operand after the native tokenizer separates formula syntax.
+_REF = re.compile(r"\$?[A-Z]{1,3}\$?[1-9]\d{0,6}", re.IGNORECASE)
 
 # Literals that carry no analytical weight and would only add noise.
 _BENIGN_LITERALS = frozenset({"0", "1", "2", "-1", "100", "0.0", "1.0"})
+_MAX_PACKAGE_MEMBERS = 10_000
+_MAX_MEMBER_BYTES = 64 * 1024 * 1024
+_MAX_PACKAGE_BYTES = 256 * 1024 * 1024
+_MAX_POPULATED_CELLS = 250_000
+_MAX_DEPENDENCIES = 250_000
+_MAX_RANGE_VISITS = 2_000_000
 
 
 def extract(path: Path) -> Extraction:
     source = str(path)
     result = Extraction(source=source, kind="xlsx")
 
-    formulas = openpyxl.load_workbook(path, data_only=False, read_only=False)
+    _validate_package(path)
+    formulas = openpyxl.load_workbook(
+        path, data_only=False, read_only=False, keep_links=False,
+    )
     try:
-        values = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        values = openpyxl.load_workbook(
+            path, data_only=True, read_only=False, keep_links=False,
+        )
     except Exception:  # pragma: no cover - some writers omit the value cache
         values = None
 
@@ -55,31 +59,142 @@ def extract(path: Path) -> Extraction:
     return result
 
 
+def _validate_package(path: Path) -> None:
+    """Bound ZIP expansion and XML work before openpyxl allocates its graph."""
+
+    import zipfile
+    from pathlib import PurePosixPath
+    from xml.etree.ElementTree import XMLParser
+
+    class Limits:
+        def __init__(self):
+            self.depth = 0
+            self.elements = 0
+            self.cells = 0
+            self.expanded_cells = 0
+
+        def start(self, tag, attributes):
+            self.depth += 1
+            self.elements += 1
+            # Native OOXML descriptors sometimes match children by local name.
+            # An alternate namespace must not bypass their allocation limits.
+            local_name = tag.rsplit("}", 1)[-1]
+            if local_name == "c":
+                self.cells += 1
+            if self.depth > 128 or self.elements > 2_000_000:
+                raise ValueError("XLSX XML structural limit exceeded")
+            if self.cells + self.expanded_cells > _MAX_POPULATED_CELLS:
+                raise ValueError("XLSX populated-cell limit exceeded")
+            if local_name in {"mergeCell", "hyperlink"}:
+                left, top, right, bottom = range_boundaries(attributes.get("ref", ""))
+                if None in (left, top, right, bottom) or not (
+                    1 <= left <= right <= 16_384 and 1 <= top <= bottom <= 1_048_576
+                ):
+                    raise ValueError("XLSX expanded-cell range must be bounded")
+                self.expanded_cells += (right - left + 1) * (bottom - top + 1)
+                if self.cells + self.expanded_cells > _MAX_POPULATED_CELLS:
+                    raise ValueError("XLSX expanded-cell limit exceeded")
+
+        def end(self, tag):
+            self.depth -= 1
+
+        def data(self, text):
+            pass
+
+        def doctype(self, name, pubid, system):
+            raise ValueError("XLSX XML document types and entities are not supported")
+
+        def close(self):
+            return None
+
+    limits = Limits()
+    with zipfile.ZipFile(path) as package:
+        members = package.infolist()
+        if len(members) > _MAX_PACKAGE_MEMBERS:
+            raise ValueError("XLSX package member limit exceeded")
+        names: set[str] = set()
+        total = 0
+        for member in members:
+            name = member.filename
+            if (
+                name in names or "\\" in name or name.startswith("/")
+                or ".." in PurePosixPath(name).parts or member.flag_bits & 1
+            ):
+                raise ValueError("XLSX package has duplicate, unsafe, or encrypted members")
+            names.add(name)
+            total += member.file_size
+            if member.file_size > _MAX_MEMBER_BYTES or total > _MAX_PACKAGE_BYTES:
+                raise ValueError("XLSX package uncompressed-byte limit exceeded")
+            if member.file_size > 65_536 and member.file_size > 200 * max(member.compress_size, 1):
+                raise ValueError("XLSX package compression-ratio limit exceeded")
+        for member in members:
+            with package.open(member) as stream:
+                # Relationships can point to XML parts with arbitrary suffixes.
+                # Identify XML bytes as well as conventional package filenames.
+                # Skip leading XML whitespace when sniffing an unnamed part;
+                # the native parser still receives the original, exact bytes.
+                head = stream.read(65_536)
+                while head and not head.strip(b" \t\r\n"):
+                    head = stream.read(65_536)
+                prefix = head.lstrip(b" \t\r\n\x00")
+                if not member.filename.casefold().endswith((".xml", ".rels")) and not prefix.startswith(
+                    (b"<", b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff"),
+                ):
+                    continue
+                parser = XMLParser(target=limits)
+                parser.feed(head)
+                consumed = len(head)
+                while block := stream.read(65_536):
+                    consumed += len(block)
+                    if consumed > _MAX_MEMBER_BYTES:
+                        raise ValueError("XLSX XML member-byte limit exceeded")
+                    parser.feed(block)
+                parser.close()
+
+
 def _extract_workbook(result: Extraction, wb, values_wb, source: str) -> None:
     unit_by_cell: dict[str, Unit] = {}
     deps: dict[str, set[str]] = {}
     referenced: set[str] = set()
     formula_cells: dict[str, str] = {}
     labels: dict[str, str] = {}
+    grids: dict[str, dict[str, object]] = {}
 
     # Pass 1: read every cell, record formulas and their dependencies.
     for ws in wb.worksheets:
         grid, texts = _read_sheet(ws)
+        grids[ws.title] = grid
         result.units.append(_sheet_unit(source, ws, grid))
 
         for addr, raw in grid.items():
             if isinstance(raw, str) and raw.startswith("="):
                 key = f"{ws.title}!{addr}"
                 formula_cells[key] = raw
-                targets = _dependencies(raw, ws.title)
-                deps[key] = targets
-                referenced |= targets
 
         labels.update(_infer_labels(ws.title, grid, texts))
 
+    # Resolve against the complete sparse workbook, including later sheets.
+    references = _ReferenceIndex(grids)
+    dependency_count = 0
+    for key, formula in formula_cells.items():
+        sheet, _addr = key.rsplit("!", 1)
+        unresolved: list[str] = []
+        targets = _dependencies(
+            formula, sheet, references=references, unresolved=unresolved,
+        )
+        deps[key] = targets
+        referenced |= targets
+        dependency_count += len(targets)
+        if dependency_count > _MAX_DEPENDENCIES:
+            raise ValueError("XLSX formula-dependency limit exceeded")
+        for reference in sorted(set(unresolved)):
+            result.add_gap(
+                f"{key} contains an unresolved formula reference: {reference}", ref=key,
+            )
+
     # Pass 2: emit a unit per formula cell, and per constant that a formula uses.
     for key, formula in formula_cells.items():
-        sheet, addr = key.split("!", 1)
+        sheet, addr = key.rsplit("!", 1)
         value = _cached_value(values_wb, sheet, addr)
         label = labels.get(key, "")
         literals = _suspect_literals(formula)
@@ -100,7 +215,10 @@ def _extract_workbook(result: Extraction, wb, values_wb, source: str) -> None:
                 "derived": True,
                 "value": value,
                 "label": label or None,
-                "functions": sorted(_FUNC.findall(formula.upper())),
+                "functions": sorted({
+                    token.value[:-1].upper() for token in _formula_tokens(formula)
+                    if token.type == "FUNC" and token.subtype == "OPEN"
+                }),
                 "hardcoded": literals or None,
                 "terminal": key not in referenced,
             },
@@ -116,7 +234,7 @@ def _extract_workbook(result: Extraction, wb, values_wb, source: str) -> None:
             )
 
     for key in sorted(referenced - set(formula_cells)):
-        sheet, addr = key.split("!", 1)
+        sheet, addr = key.rsplit("!", 1)
         value = _cached_value(values_wb, sheet, addr)
         if value is None:
             continue
@@ -176,14 +294,16 @@ def _read_sheet(ws) -> tuple[dict[str, object], dict[str, str]]:
     """Return every non-empty cell, plus the subset holding text."""
     grid: dict[str, object] = {}
     texts: dict[str, str] = {}
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value is None:
-                continue
-            addr = f"{get_column_letter(cell.column)}{cell.row}"
-            grid[addr] = cell.value
-            if isinstance(cell.value, str) and not cell.value.startswith("="):
-                texts[addr] = cell.value.strip()
+    # openpyxl's public rectangular iterator materializes every empty cell
+    # between A1 and the last address. A sparse worksheet can span billions of
+    # coordinates. Its native sparse cell map preserves actual cells only.
+    for _position, cell in sorted(ws._cells.items()):
+        if cell.value is None:
+            continue
+        addr = f"{get_column_letter(cell.column)}{cell.row}"
+        grid[addr] = cell.value
+        if isinstance(cell.value, str) and not cell.value.startswith("="):
+            texts[addr] = cell.value.strip()
     return grid, texts
 
 
@@ -218,28 +338,124 @@ def _sheet_unit(source: str, ws, grid: dict[str, object]) -> Unit:
 # --------------------------------------------------------------------------- #
 
 
-def _dependencies(formula: str, current_sheet: str) -> set[str]:
-    """Every cell a formula reads, ranges expanded to their corners.
+def _formula_tokens(formula: str):
+    if len(formula) > 16_384:
+        raise ValueError("XLSX formula-length limit exceeded")
+    try:
+        return Tokenizer(formula).items
+    except TokenizerError:
+        return []
 
-    Expanding a range fully would produce thousands of edges for a
-    ``SUM(A1:A5000)`` and tell you nothing extra, so ranges contribute their
-    endpoints and record the span in the relation's evidence instead.
+
+class _ReferenceIndex:
+    """A workbook's sparse native cells and a bounded range-query cache."""
+
+    def __init__(self, grids: dict[str, dict[str, object]]) -> None:
+        self.sheets = {name.casefold(): name for name in grids}
+        self.positions = {}
+        for sheet, grid in grids.items():
+            self.positions[sheet] = sorted(
+                (_split(cell)[1], _col_index(_split(cell)[0]), cell) for cell in grid
+            )
+        self.visits = 0
+        self.ranges: dict[tuple[str, int, int, int, int], set[str]] = {}
+
+    def cells_in_range(self, sheet, left, top, right, bottom) -> set[str]:
+        from bisect import bisect_left, bisect_right
+
+        key = (sheet, left, top, right, bottom)
+        if key not in self.ranges:
+            positions = self.positions[sheet]
+            start = bisect_left(positions, (top, 0, ""))
+            end = bisect_right(positions, (bottom, 16_385, ""))
+            self.visits += end - start
+            if self.visits > _MAX_RANGE_VISITS:
+                raise ValueError("XLSX formula range-inspection limit exceeded")
+            self.ranges[key] = {
+                f"{sheet}!{cell}" for _row, col, cell in positions[start:end]
+                if left <= col <= right
+            }
+        return self.ranges[key]
+
+
+def _dependencies(
+    formula: str,
+    current_sheet: str,
+    *,
+    references: _ReferenceIndex,
+    unresolved: list[str],
+) -> set[str]:
+    """Resolve native reference operands, never strings or function names.
+
+    Ranges include every populated cell. Unresolved names, external/3-D
+    references, and dynamic references become findings at the formula cell;
+    they must not be silently presented as a complete dependency graph.
     """
     found: set[str] = set()
-    body = formula[1:] if formula.startswith("=") else formula
-
-    for m in _REF.finditer(body):
-        sheet = (m.group("sheet") or current_sheet).strip("'")
-        for group in ("start", "end"):
-            if ref := m.group(group):
-                found.add(f"{sheet}!{ref.replace('$', '')}")
+    tokens = _formula_tokens(formula)
+    if not tokens:
+        unresolved.append("formula syntax could not be tokenized")
+    for index, token in enumerate(tokens[1:-1], start=1):
+        before, after = tokens[index - 1], tokens[index + 1]
+        if token.type == "WHITE-SPACE" and (
+            before.subtype == "RANGE" or before.subtype == "CLOSE"
+        ) and (
+            after.subtype == "RANGE"
+            or after.type in {"PAREN", "FUNC"} and after.subtype == "OPEN"
+        ):
+            unresolved.append("reference intersection is not resolved")
+            return found
+    for token in tokens:
+        if token.type == "FUNC" and token.subtype == "OPEN":
+            if token.value[:-1].upper() in {"INDIRECT", "OFFSET"}:
+                unresolved.append(f"dynamic {token.value[:-1].upper()} target")
+            continue
+        if token.type != "OPERAND" or token.subtype != "RANGE":
+            if token.subtype == "ERROR" and token.value == "#REF!":
+                unresolved.append(token.value)
+            continue
+        reference = token.value
+        if "!" in reference:
+            qualifier, address = reference.rsplit("!", 1)
+            sheet = qualifier[1:-1].replace("''", "'") if qualifier.startswith("'") and qualifier.endswith("'") else qualifier
+        else:
+            sheet, address = current_sheet, reference
+        sheet = references.sheets.get(sheet.casefold(), sheet)
+        if sheet not in references.positions or any(character in sheet for character in "[]:"):
+            unresolved.append(reference)
+            continue
+        address = address.replace("$", "").upper()
+        if _REF.fullmatch(address):
+            column, row = _split(address)
+            if _col_index(column) <= 16_384 and row <= 1_048_576:
+                found.add(f"{sheet}!{address}")
+            else:
+                unresolved.append(reference)
+            continue
+        if ":" not in address:
+            unresolved.append(reference)
+            continue
+        try:
+            left, top, right, bottom = range_boundaries(address)
+        except ValueError:
+            unresolved.append(reference)
+            continue
+        left, top = left or 1, top or 1
+        right, bottom = right or 16_384, bottom or 1_048_576
+        if not (1 <= left <= right <= 16_384 and 1 <= top <= bottom <= 1_048_576):
+            unresolved.append(reference)
+            continue
+        found.update(references.cells_in_range(sheet, left, top, right, bottom))
     return found
 
 
 def _suspect_literals(formula: str) -> list[str]:
     """Numbers typed directly into a formula that probably should be inputs."""
     out: list[str] = []
-    for raw in _LITERAL.findall(formula):
+    for token in _formula_tokens(formula):
+        if token.type != "OPERAND" or token.subtype != "NUMBER":
+            continue
+        raw = token.value
         if raw in _BENIGN_LITERALS:
             continue
         out.append(raw)

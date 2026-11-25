@@ -1,11 +1,10 @@
-# AutoTLDR {{VERSION}} private-alpha guide
+# AutoTLDR {{VERSION}} installation guide
 
 Support for this build: **{{SUPPORT}}**
 
-AutoTLDR is pre-alpha local software. Commands, configuration, and output schemas may
-change between builds. This preview is for observed first-user sessions; it is not a
-stable release and should be used only with non-sensitive material you are permitted to
-process.
+AutoTLDR explains technical artifacts through cited prose and native evidence. Commands,
+configuration, and output schemas may evolve during 0.x development. This guide is
+rendered with the exact package version and support contact when the release bundle is built.
 
 ## Before you begin
 
@@ -14,12 +13,12 @@ You need:
 - a Unix-like terminal (Linux, macOS, or WSL);
 - Python 3.12;
 - [`uv`](https://docs.astral.sh/uv/);
-- LM Studio listening locally at `http://127.0.0.1:1234`; and
-- one generation model that you intentionally loaded in LM Studio.
+- an OpenAI-compatible inference server you can reach (LM Studio, llama.cpp, vLLM,
+  Ollama, or a gateway such as LiteLLM) and the exact ID of one generation model on it.
 
-AutoTLDR does not download, load, unload, or silently select a model. Source evidence sent
-for prose generation stays on the loopback-local LM Studio endpoint. URL inputs are the
-exception: they deliberately make bounded outbound HTTP(S) requests.
+AutoTLDR does not download, load, or silently select a model. Each prose run sends a
+bounded evidence pack to the configured server, wherever it runs. URL inputs make
+outbound HTTP(S) requests.
 
 ## Install this exact build
 
@@ -35,25 +34,26 @@ autotldr --version
 The final command must print `{{VERSION}}`. The adjacent `SHA256SUMS` file records the
 exact files in this bundle.
 
-## Connect the local model
-
-If LM Studio has exactly one active generation model:
+## Connect the model server
 
 ```bash
-autotldr setup
+# LM Studio on this machine (default base URL http://127.0.0.1:1234/v1)
+autotldr setup --model EXACT_MODEL_ID
+
+# Any server on your network
+autotldr setup --base-url http://inference-host:8080/v1 --model EXACT_MODEL_ID
+
+# A gateway that requires a key; only the variable name is stored
+export LITELLM_API_KEY=...
+autotldr setup --base-url http://gateway-host:4000/v1 \
+  --api-key-env LITELLM_API_KEY --model EXACT_MODEL_ID
+
 autotldr doctor
 ```
 
-If setup reports multiple active generation models, choose the one intended for this
-preview and rerun the exact command it shows:
-
-```bash
-autotldr setup --model EXACT-ACTIVE-MODEL-ID
-autotldr doctor
-```
-
-`doctor` sends one small synthetic conformance prompt; it does not read your artifact and
-does not change model residency. Continue only when doctor reports ready.
+Without `--model`, setup prints the IDs the server lists. `doctor` sends one small
+synthetic request and does not read your artifacts. Continue when it reports ready.
+The walkthrough is at <https://github.com/akougkas/AutoTLDR/blob/main/docs/try-it.md>.
 
 ## Try one real artifact
 
@@ -63,7 +63,7 @@ Quote the path and put `--` before it so a filename cannot become an option:
 autotldr -- "/path/to/your/artifact"
 ```
 
-The ordinary command returns a local-model prose TLDR with citations, supporting native
+The ordinary command returns a prose TLDR with citations, supporting native
 evidence, and explicit gaps. Choose a detail level only when it helps your task:
 
 ```bash

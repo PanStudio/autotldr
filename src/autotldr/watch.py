@@ -166,7 +166,7 @@ def run_once(
 
     ``budget`` is applied independently to every complete Markdown artifact by
     the existing exact renderer.  The ordinary path uses the same configured
-    local-model and detail policy as invoke mode. Watch never loads, unloads, or
+    model-server and detail policy as invoke mode. Watch never loads, unloads, or
     selects a model; ``mode='evidence'`` is the explicit model-off path.
     """
 
@@ -185,10 +185,14 @@ def run_once(
         from .product import load_product_config
 
         product_config = load_product_config(use_config=use_config)
+    policy = _artifact_policy(
+        product_config, detail=detail, mode=mode,
+        allow_evidence_fallback=allow_evidence_fallback, budget=budget,
+    )
     if mode == "prose":
-        from .product import require_active_model, require_configured_model
+        from .product import require_configured_model, require_model_available
 
-        require_active_model(require_configured_model(product_config))
+        require_model_available(require_configured_model(product_config))
     registry = None
     if product_config.extensions:
         from .api import _load_product_extensions
@@ -212,6 +216,8 @@ def run_once(
     previous = _load_records(connection)
     stored_root = _meta_value(connection, "root")
     relocated = stored_root is not None and stored_root != str(root)
+    policy_changed = _meta_value(connection, "artifact_policy") != policy
+    rollup_pending = _meta_value(connection, "rollup_pending") == "true"
     outcomes: dict[str, _FileRecord] = {}
     extracted: dict[str, Any] = {}
     errors: list[WatchError] = []
@@ -252,7 +258,15 @@ def run_once(
             errors.append(WatchError(run_id, candidate.relative, message, now))
             continue
 
-        if old is not None and old.sha256 == digest and not relocated:
+        target = artifact_path(root, candidate.relative)
+        if (
+            old is not None
+            and old.sha256 == digest
+            and old.status == "ok"
+            and not relocated
+            and not policy_changed
+            and target.is_file()
+        ):
             unchanged += 1
             outcomes[candidate.relative] = _FileRecord(
                 candidate.relative,
@@ -267,12 +281,12 @@ def run_once(
             continue
 
         changed += 1
-        target = artifact_path(root, candidate.relative)
         try:
             from .api import acquire, apply_product_synthesis
             from .render import render
 
             base_extraction = acquire([stable_candidate.path], registry=registry)
+            _verify_acquired_digest(base_extraction, digest)
             completed, _synthesis = apply_product_synthesis(
                 base_extraction,
                 detail=detail,
@@ -328,7 +342,10 @@ def run_once(
 
     rollup = artifact_root / ROLLUP_NAME
     rollup_written = False
-    rebuild_rollup = bool(changed or removed_paths or relocated or not rollup.exists())
+    rebuild_rollup = bool(
+        changed or removed_paths or relocated or policy_changed
+        or rollup_pending or not rollup.exists()
+    )
     if rebuild_rollup:
         rollup_extractions: list[Any] = []
         for candidate in candidates:
@@ -341,6 +358,7 @@ def run_once(
                     from .api import acquire
 
                     extraction = acquire([candidate.path], registry=registry)
+                    _verify_acquired_digest(extraction, record.sha256)
                 except Exception as exc:
                     failed += 1
                     message = _safe_error(exc, root)
@@ -368,6 +386,13 @@ def run_once(
             collection = assemble_collection(
                 rollup_extractions,
                 subject=str(root),
+            )
+            # A published roll-up must report the sources it could not read.
+            # Durable status alone is not visible to somebody sharing the brief.
+            collection.gaps.extend(
+                f"Watch could not summarize {record.relative}: {record.error}"
+                for record in outcomes.values()
+                if record.status != "ok"
             )
             collection, _synthesis = apply_product_synthesis(
                 collection,
@@ -409,6 +434,8 @@ def run_once(
         succeeded=succeeded,
         failed=failed,
         rollup_written=rollup_written,
+        artifact_policy=policy,
+        rollup_pending=rebuild_rollup and not rollup_written,
     )
     connection.close()
 
@@ -425,6 +452,59 @@ def run_once(
         artifacts=tuple(artifacts),
         errors=tuple(errors),
     )
+
+
+def _artifact_policy(
+    config: Any,
+    *,
+    detail: str | None,
+    mode: str,
+    allow_evidence_fallback: bool | None,
+    budget: int | None,
+) -> str:
+    """Bind cached artifacts to their effective product and rendering policy."""
+
+    import json
+
+    from ._version import __version__
+    from .product import DETAIL_PROFILES, ProductConfigError
+
+    effective_detail = config.detail if detail is None else detail
+    if effective_detail not in DETAIL_PROFILES:
+        raise ProductConfigError("detail must be brief, standard, or deep")
+    fallback = (
+        config.allow_evidence_fallback
+        if allow_evidence_fallback is None else allow_evidence_fallback
+    )
+    if not isinstance(fallback, bool):
+        raise ProductConfigError("allow_evidence_fallback must be a boolean")
+    return json.dumps(
+        {
+            "version": __version__,
+            "detail": DETAIL_PROFILES[effective_detail].as_manifest(),
+            "mode": mode,
+            "allow_evidence_fallback": fallback,
+            "budget": budget,
+            "config": config.as_manifest(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _verify_acquired_digest(extraction: Any, expected: str | None) -> None:
+    """Never cache a successful artifact under a different source snapshot."""
+
+    # Archives are collections with member hashes; their container bytes have
+    # a separate acquisition record. Ordinary files have one input manifest.
+    if extraction.kind == "collection":
+        acquisitions = extraction.meta.get("collection_acquisitions", [])
+        records = [item.get("container", {}) for item in acquisitions]
+    else:
+        records = extraction.meta.get("inputs", [])
+    if not records or records[0].get("sha256") != expected:
+        raise UnstableSourceError("source changed between watch scan and acquisition")
 
 
 def watch(
@@ -737,9 +817,12 @@ def _hash_snapshot(path: Path) -> tuple[str, int, int]:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise OSError(f"{path.name}: source is not a regular file")
-        with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
+        byte_count = 0
+        while chunk := os.read(
+            descriptor, min(1024 * 1024, before.st_size + 1 - byte_count)
+        ):
+            digest.update(chunk)
+            byte_count += len(chunk)
         after = os.fstat(descriptor)
         final = path.lstat()
     finally:
@@ -762,7 +845,10 @@ def _hash_snapshot(path: Path) -> tuple[str, int, int]:
         final.st_size,
         final.st_mtime_ns,
     )
-    if identity_before != identity_after or identity_after != identity_final:
+    if (
+        identity_before != identity_after or identity_after != identity_final
+        or byte_count != before.st_size
+    ):
         raise UnstableSourceError(f"{path.name}: source changed while being read")
     return digest.hexdigest(), before.st_size, before.st_mtime_ns
 
@@ -874,11 +960,20 @@ def _finish_run(
     succeeded: int,
     failed: int,
     rollup_written: bool,
+    artifact_policy: str,
+    rollup_pending: bool,
 ) -> None:
     with connection:
         connection.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES('root', ?)",
             (str(root),),
+        )
+        connection.executemany(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+            [
+                ("artifact_policy", artifact_policy),
+                ("rollup_pending", "true" if rollup_pending else "false"),
+            ],
         )
         for relative in removed_paths:
             connection.execute("DELETE FROM files WHERE path = ?", (relative,))

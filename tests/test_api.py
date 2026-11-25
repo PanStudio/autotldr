@@ -13,17 +13,12 @@ import pytest
 import autotldr
 from autotldr.api import AutoTLDRResult, acquire, summarize
 from autotldr.router import extract
-from autotldr.synthesis import (
-    SynthesisConfig,
-    SynthesisTimeoutError,
-    offline_test_transport_attestation,
-)
+from autotldr.synthesis import SynthesisConfig, SynthesisTimeoutError
 
 
 class _Client:
     def __init__(self, response: bytes | BaseException) -> None:
         self.response = response
-        self.attestation = offline_test_transport_attestation()
 
     def complete(
         self,

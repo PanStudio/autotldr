@@ -1,6 +1,6 @@
 ---
 name: autotldr
-description: Produce cited local-model TLDRs or deterministic evidence maps for local files, directories, and mixed-format collections with AutoTLDR's native semantic extractors and hard output budgets. Use when Codex needs a grounded overview of documents, code, structured data, notebooks, spreadsheets, or dataset structure; needs claims it can trace to source locations; or must fit extracted meaning into a bounded context window.
+description: Produce cited model TLDRs or deterministic evidence maps for local files, directories, and mixed-format collections with AutoTLDR's native semantic extractors and hard output budgets. Use when Codex needs a grounded overview of documents, code, structured data, notebooks, spreadsheets, or dataset structure; needs claims it can trace to source locations; or must fit extracted meaning into a bounded context window.
 ---
 
 # AutoTLDR
@@ -8,7 +8,7 @@ description: Produce cited local-model TLDRs or deterministic evidence maps for 
 Use the installed `autotldr` CLI. Treat it as a local Unix tool: supply paths,
 read stdout, and preserve its addressable origins and named gaps.
 
-Ordinary invocation uses the local model configured by `autotldr setup` and
+Ordinary invocation uses the model server configured by `autotldr setup` and
 returns citation-constrained prose. Use `--model off` only when the user asks
 for deterministic evidence or when model use is outside the task's authority.
 

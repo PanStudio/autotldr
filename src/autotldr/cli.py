@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Point it at anything. Get back what it means.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""commands:
-  setup          configure one active LM Studio model
+  setup          configure an OpenAI-compatible model server
   doctor         verify config, model conformance, and dependencies
   config         show resolved settings and their source paths
   formats        show runtime-derived input and output support
@@ -105,7 +105,7 @@ examples:
         "--budget",
         type=_positive_int,
         metavar="N",
-        help="hard complete-output ceiling in portable tokens (UTF-8 bytes)",
+        help="hard ceiling on complete output bytes (UTF-8 text or binary PDF)",
     )
     parser.add_argument(
         "--cite",
@@ -153,7 +153,7 @@ examples:
         metavar="MODE",
         help=(
             "model mode; use 'off' for an explicit deterministic evidence map "
-            "(ordinary use reads the configured local model)"
+            "or an exact model ID served by the configured server"
         ),
     )
     parser.add_argument(
@@ -287,18 +287,24 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--crawl requires exactly one HTTP(S) source")
     if args.crawl and args.input_type is not None:
         parser.error("--type cannot be combined with --crawl")
-    if args.model is not None and args.model != "off":
-        parser.error(
-            "direct --model IDs cannot prove ZBook-local routing; configure product "
-            "prose with `autotldr setup`, use --model off for evidence, or use "
-            "run_local_candidates.py for guarded evaluation"
-        )
     from .product import load_product_config
 
     try:
         product_config = load_product_config(use_config=not args.no_config)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.model is not None and args.model != "off":
+        # A model ID overrides only the name; the configured server stays in force.
+        if product_config.model is None:
+            parser.error("--model ID needs a configured server; run `autotldr setup` first")
+        from dataclasses import replace
+
+        try:
+            product_config = replace(
+                product_config, model=replace(product_config.model, model=args.model)
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
     import os
 
     explicit_model_off = args.model == "off" or os.environ.get(
@@ -330,10 +336,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"autotldr: {decline}", file=sys.stderr)
             return EXIT_UNSUPPORTED
         if not explicit_model_off:
-            from .product import require_active_model, require_configured_model
+            from .product import require_configured_model, require_model_available
 
             try:
-                require_active_model(require_configured_model(product_config))
+                require_model_available(require_configured_model(product_config))
             except ValueError as exc:
                 print(f"autotldr: {exc}", file=sys.stderr)
                 return EXIT_ERROR
@@ -583,15 +589,37 @@ def _formats_main(argv: list[str]) -> int:
 
 
 def _setup_main(argv: list[str]) -> int:
-    """Discover and persist one explicit model on the certified alpha runtime."""
+    """Persist one OpenAI-compatible server and model after checking its catalog."""
 
-    from .product import DEFAULT_LOCAL_ENDPOINT
+    from .product import DEFAULT_BASE_URL
 
     parser = argparse.ArgumentParser(
         prog="autotldr setup",
-        description="Configure one already-active LM Studio model for cited prose TLDRs.",
+        description=(
+            "Configure the OpenAI-compatible server that writes cited prose. "
+            "Sources are read and rendered locally; only the bounded evidence pack "
+            "is sent to this server."
+        ),
     )
-    parser.add_argument("--model", metavar="ID", help="exact active model ID")
+    parser.add_argument(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        metavar="URL",
+        help=f"OpenAI-compatible base URL (default: {DEFAULT_BASE_URL})",
+    )
+    parser.add_argument("--model", metavar="ID", help="exact model ID from the server catalog")
+    parser.add_argument(
+        "--api-key-env",
+        metavar="NAME",
+        help="environment variable holding the server's API key (the key is not stored)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        metavar="SECONDS",
+        help="per-request timeout, at most 300 (default: 120)",
+    )
     parser.add_argument(
         "--detail",
         choices=("brief", "standard", "deep"),
@@ -600,43 +628,35 @@ def _setup_main(argv: list[str]) -> int:
     parser.add_argument("--force", action="store_true", help="replace existing user config")
     args = parser.parse_args(argv)
     from .product import (
-        LocalModelUnavailable,
         ModelProfile,
+        ModelUnavailable,
         ProductConfigError,
-        discover_served_models,
+        list_served_models,
         write_user_model_config,
     )
 
     try:
-        models = discover_served_models(DEFAULT_LOCAL_ENDPOINT)
         if args.model is None:
-            if not models:
-                raise LocalModelUnavailable(
-                    "LM Studio has no eligible local generation model active; "
-                    "load one directly on this machine and retry"
-                )
+            probe = ModelProfile(args.base_url, "-", args.timeout, args.api_key_env)
+            models = list_served_models(probe.base_url, api_key=probe.api_key())
             if len(models) != 1:
-                choices = ", ".join(models)
-                raise LocalModelUnavailable(
-                    f"multiple generation models are active ({choices}); rerun with --model ID"
+                shown = "\n  ".join(models) if models else "(none)"
+                raise ModelUnavailable(
+                    f"choose a model with --model ID; {probe.base_url} lists:\n  {shown}"
                 )
             selected = models[0]
         else:
             selected = args.model
-            if selected not in models:
-                raise LocalModelUnavailable(
-                    f"model {selected!r} is not active; active: {', '.join(models) or 'none'}"
-                )
-        path = write_user_model_config(
-            ModelProfile(DEFAULT_LOCAL_ENDPOINT, selected),
-            detail=args.detail,
-            force=args.force,
-        )
-    except (ProductConfigError, LocalModelUnavailable, OSError) as exc:
+        profile = ModelProfile(args.base_url, selected, args.timeout, args.api_key_env)
+        from .product import require_model_available
+
+        require_model_available(profile)
+        path = write_user_model_config(profile, detail=args.detail, force=args.force)
+    except (ProductConfigError, OSError) as exc:
         print(f"autotldr setup: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    print(f"Configured local model {selected!r} in {path}")
-    print("Run `autotldr doctor` to verify the complete installation.")
+    print(f"Configured {selected!r} at {profile.base_url} in {path}")
+    print("Run `autotldr doctor` to send one test request.")
     return EXIT_OK
 
 
@@ -645,7 +665,7 @@ def _doctor_main(argv: list[str]) -> int:
 
     parser = argparse.ArgumentParser(
         prog="autotldr doctor",
-        description="Check configuration, local model service, and format dependencies.",
+        description="Check configuration, the model server, and format dependencies.",
     )
     parser.add_argument("--json", action="store_true", help="emit canonical JSON")
     parser.add_argument("--no-config", action="store_true", help="ignore persisted config")
@@ -653,11 +673,10 @@ def _doctor_main(argv: list[str]) -> int:
 
     from .capabilities import runtime_capabilities
     from .product import (
-        LocalModelUnavailable,
         ProductConfigError,
-        discover_local_runtime,
         load_product_config,
         probe_model_profile,
+        require_model_available,
         user_config_path,
     )
 
@@ -684,60 +703,41 @@ def _doctor_main(argv: list[str]) -> int:
         if config.model is None:
             ready = False
             checks.append(
-                {"name": "local-model", "status": "missing", "detail": "run `autotldr setup`"}
+                {"name": "model-server", "status": "missing", "detail": "run `autotldr setup`"}
             )
         else:
             try:
-                runtime = discover_local_runtime(config.model.endpoint)
-            except LocalModelUnavailable as exc:
+                require_model_available(config.model)
+            except ProductConfigError as exc:
                 ready = False
-                checks.append({"name": "local-model", "status": "error", "detail": str(exc)})
+                checks.append({"name": "model-server", "status": "error", "detail": str(exc)})
             else:
-                exact = (
-                    runtime.active_state_verified
-                    and runtime.provider == config.model.runtime
-                    and config.model.model in runtime.active_models
-                )
-                ready &= exact
                 checks.append(
                     {
-                        "name": "local-model",
-                        "status": "ok" if exact else "error",
-                        "detail": (
-                            f"{config.model.model} active in {runtime.provider} at "
-                            f"{config.model.endpoint}"
-                            if exact
-                            else f"configured {config.model.model!r}; active: "
-                            f"{', '.join(runtime.active_models) or 'unverified/none'}"
-                        ),
+                        "name": "model-server",
+                        "status": "ok",
+                        "detail": f"{config.model.model} listed at {config.model.base_url}",
                     }
                 )
-                if exact:
-                    try:
-                        probe = probe_model_profile(config.model)
-                    except Exception as exc:
-                        ready = False
-                        checks.append(
-                            {
-                                "name": "grounded-prose",
-                                "status": "error",
-                                "detail": (
-                                    f"{type(exc).__name__}: local completion did not "
-                                    "pass the grounded response contract"
-                                ),
-                            }
-                        )
-                    else:
-                        checks.append(
-                            {
-                                "name": "grounded-prose",
-                                "status": "ok",
-                                "detail": (
-                                    f"accepted bounded diagnostic response from "
-                                    f"{probe['model']}"
-                                ),
-                            }
-                        )
+                try:
+                    probe = probe_model_profile(config.model)
+                except Exception as exc:
+                    ready = False
+                    checks.append(
+                        {
+                            "name": "grounded-prose",
+                            "status": "error",
+                            "detail": f"test request failed: {_probe_failure(exc)}",
+                        }
+                    )
+                else:
+                    checks.append(
+                        {
+                            "name": "grounded-prose",
+                            "status": "ok",
+                            "detail": f"accepted a cited test response from {probe['model']}",
+                        }
+                    )
 
     inventory = runtime_capabilities()
     available = sum(item["status"] == "available" for item in inventory["inputs"])
@@ -764,8 +764,23 @@ def _doctor_main(argv: list[str]) -> int:
         for check in checks:
             print(f"  {str(check['status']).upper():<7} {check['name']}: {check['detail']}")
         print()
-        print("Ready for cited local prose." if ready else "Not ready; follow the actions above.")
+        print("Ready for cited prose." if ready else "Not ready; follow the actions above.")
     return EXIT_OK if ready else EXIT_ERROR
+
+
+def _probe_failure(exc: BaseException) -> str:
+    """Name why the doctor request failed without echoing evidence or secrets."""
+
+    cause = exc.__cause__
+    model_run = getattr(exc, "model_run", None)
+    code = (
+        model_run.get("validation", {}).get("error_code")
+        if isinstance(model_run, dict)
+        else None
+    )
+    if cause is not None and str(cause):
+        return f"{code}: {cause}" if code else str(cause)
+    return code or f"{type(exc).__name__}: {exc}"
 
 
 def _config_main(argv: list[str]) -> int:
@@ -808,7 +823,7 @@ def _config_main(argv: list[str]) -> int:
     print(
         "  model: "
         + (
-            f"{config.model.model} at {config.model.endpoint}"
+            f"{config.model.model} at {config.model.base_url}"
             if config.model is not None
             else "not configured"
         )

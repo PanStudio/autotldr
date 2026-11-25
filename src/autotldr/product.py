@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 
 CONFIG_VERSION = 1
-DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:1234"
+DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
 DETAIL_NAMES = ("brief", "standard", "deep")
 
 
@@ -22,8 +22,8 @@ class ProductConfigError(ValueError):
     """A persisted or requested product setting is invalid."""
 
 
-class LocalModelUnavailable(ProductConfigError):
-    """The configured local endpoint cannot provide the requested model."""
+class ModelUnavailable(ProductConfigError):
+    """The configured inference server cannot provide the requested model."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,42 +34,52 @@ class DetailProfile:
     evidence_budget_bytes: int
     max_claims: int
     max_output_tokens: int
-    timeout_seconds: float
     include_supporting_units: bool
     reasoning_effort: str | None
 
     def as_manifest(self) -> dict[str, object]:
         return {
-            "schema": "autotldr-detail-profile-v1",
+            "schema": "autotldr-detail-profile-v2",
             "name": self.name,
             "evidence_budget_bytes": self.evidence_budget_bytes,
             "max_claims": self.max_claims,
             "max_output_tokens": self.max_output_tokens,
-            "timeout_seconds": self.timeout_seconds,
             "include_supporting_units": self.include_supporting_units,
             "reasoning_effort": self.reasoning_effort,
         }
 
 
 DETAIL_PROFILES: Mapping[str, DetailProfile] = {
-    "brief": DetailProfile("brief", 8_000, 2, 512, 60.0, False, "none"),
-    "standard": DetailProfile("standard", 24_000, 4, 1_024, 90.0, True, "none"),
-    "deep": DetailProfile("deep", 48_000, 6, 1_800, 120.0, True, "none"),
+    "brief": DetailProfile("brief", 8_000, 2, 512, False, "none"),
+    "standard": DetailProfile("standard", 24_000, 4, 1_024, True, "none"),
+    "deep": DetailProfile("deep", 48_000, 6, 1_800, True, "none"),
 }
 
 
 @dataclass(frozen=True, slots=True)
 class ModelProfile:
-    """One explicit local model identity used by ordinary invocation."""
+    """One OpenAI-compatible server and the exact model AutoTLDR asks it for.
 
-    endpoint: str
+    The server may be local (LM Studio, llama.cpp) or anywhere reachable, such as a
+    homelab gateway. Evidence packs are sent to ``base_url``; source acquisition and
+    rendering always stay on this machine. The API key itself is never persisted;
+    only the name of the environment variable that holds it.
+    """
+
+    base_url: str
     model: str
     timeout_seconds: float = 120.0
-    runtime: str = "lm-studio"
+    api_key_env: str | None = None
 
     def __post_init__(self) -> None:
-        endpoint = _local_endpoint(self.endpoint)
-        object.__setattr__(self, "endpoint", endpoint)
+        from .transport import normalize_base_url, validate_env_name
+
+        try:
+            object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
+            if self.api_key_env is not None:
+                validate_env_name(self.api_key_env)
+        except ValueError as exc:
+            raise ProductConfigError(f"model {exc}") from exc
         if (
             type(self.model) is not str
             or not self.model
@@ -87,37 +97,26 @@ class ModelProfile:
             or not 0 < float(self.timeout_seconds) <= 300
         ):
             raise ProductConfigError("model timeout_seconds must be in (0, 300]")
-        if self.runtime != "lm-studio":
-            raise ProductConfigError(
-                "alpha runtime must be 'lm-studio'; other local transports are not yet certified"
+
+    def api_key(self) -> str | None:
+        """Resolve the key from the environment at use time."""
+
+        if self.api_key_env is None:
+            return None
+        value = os.environ.get(self.api_key_env)
+        if not value:
+            raise ModelUnavailable(
+                f"environment variable {self.api_key_env} is not set; "
+                "export the API key for the configured server"
             )
+        return value
 
     def as_manifest(self) -> dict[str, object]:
         return {
-            "endpoint": self.endpoint,
+            "base_url": self.base_url,
             "model": self.model,
             "timeout_seconds": float(self.timeout_seconds),
-            "runtime": self.runtime,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeDiscovery:
-    """Catalog and active-residency facts reported by one local runtime."""
-
-    provider: str
-    endpoint: str
-    catalog_models: tuple[str, ...]
-    active_models: tuple[str, ...]
-    active_state_verified: bool
-
-    def as_manifest(self) -> dict[str, object]:
-        return {
-            "provider": self.provider,
-            "endpoint": self.endpoint,
-            "catalog_models": list(self.catalog_models),
-            "active_models": list(self.active_models),
-            "active_state_verified": self.active_state_verified,
+            "api_key_env": self.api_key_env,
         }
 
 
@@ -228,10 +227,14 @@ def write_user_model_config(
         f'detail = "{detail}"\n'
         "allow_evidence_fallback = false\n\n"
         "[model]\n"
-        f'endpoint = {json.dumps(profile.endpoint)}\n'
+        f'base_url = {json.dumps(profile.base_url)}\n'
         f'name = {json.dumps(profile.model)}\n'
         f"timeout_seconds = {float(profile.timeout_seconds):g}\n"
-        f'runtime = {json.dumps(profile.runtime)}\n'
+        + (
+            f'api_key_env = {json.dumps(profile.api_key_env)}\n'
+            if profile.api_key_env is not None
+            else ""
+        )
     )
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
@@ -257,141 +260,94 @@ def write_user_model_config(
     return path
 
 
-def discover_local_runtime(
-    endpoint: str = DEFAULT_LOCAL_ENDPOINT,
+def list_served_models(
+    base_url: str = DEFAULT_BASE_URL,
     *,
-    timeout_seconds: float = 2.0,
-) -> RuntimeDiscovery:
-    """Separate catalog availability from actively loaded model instances."""
-
-    import urllib.error
-
-    normalized = _local_endpoint(endpoint)
-    catalog_url = normalized.rstrip("/") + (
-        "/models" if normalized.endswith("/v1") else "/v1/models"
-    )
-    document = _read_runtime_json(
-        catalog_url,
-        timeout_seconds=timeout_seconds,
-        maximum_bytes=256 * 1024,
-        label="local model catalog",
-    )
-    if type(document) is not dict or set(document) - {"object", "data"}:
-        raise LocalModelUnavailable("local model catalog has an unsupported envelope")
-    rows = document.get("data")
-    if type(rows) is not list:
-        raise LocalModelUnavailable("local model catalog has no data array")
-    models: list[str] = []
-    for row in rows:
-        if type(row) is not dict or type(row.get("id")) is not str:
-            raise LocalModelUnavailable("local model catalog contains an invalid row")
-        identifier = row["id"]
-        if not identifier or identifier.strip() != identifier:
-            raise LocalModelUnavailable("local model catalog contains an invalid model ID")
-        models.append(identifier)
-    if len(models) != len(set(models)):
-        raise LocalModelUnavailable("local model catalog contains duplicate model IDs")
-    catalog_models = tuple(sorted(models))
-
-    root = normalized[:-3] if normalized.endswith("/v1") else normalized
-    lm_studio_url = root.rstrip("/") + "/api/v1/models"
-    try:
-        runtime_document = _read_runtime_json(
-            lm_studio_url,
-            timeout_seconds=timeout_seconds,
-            maximum_bytes=2 * 1024 * 1024,
-            label="LM Studio runtime inventory",
-        )
-    except LocalModelUnavailable as exc:
-        cause = exc.__cause__
-        if not isinstance(cause, urllib.error.HTTPError) or cause.code != 404:
-            # A valid OpenAI catalog without the LM Studio management surface is a real
-            # transport, but it cannot prove that a request will not trigger auto-load.
-            return RuntimeDiscovery(
-                "openai-compatible-unverified",
-                normalized,
-                catalog_models,
-                (),
-                False,
-            )
-        return RuntimeDiscovery(
-            "openai-compatible-unverified",
-            normalized,
-            catalog_models,
-            (),
-            False,
-        )
-    active_models = _lm_studio_active_models(runtime_document)
-    unknown_active = sorted(set(active_models) - set(catalog_models))
-    if unknown_active:
-        raise LocalModelUnavailable(
-            f"LM Studio reports active model {unknown_active[0]!r} outside its OpenAI catalog"
-        )
-    return RuntimeDiscovery(
-        "lm-studio",
-        normalized,
-        catalog_models,
-        active_models,
-        True,
-    )
-
-
-def discover_served_models(
-    endpoint: str = DEFAULT_LOCAL_ENDPOINT,
-    *,
-    timeout_seconds: float = 2.0,
+    api_key: str | None = None,
+    timeout_seconds: float = 10.0,
 ) -> tuple[str, ...]:
-    """Return only model IDs proven active, never the downloaded catalog."""
+    """Return the model IDs the server's ``/models`` catalog advertises."""
 
-    discovery = discover_local_runtime(endpoint, timeout_seconds=timeout_seconds)
-    if not discovery.active_state_verified:
-        raise LocalModelUnavailable(
-            "the endpoint does not expose verified active-model state; alpha setup "
-            "currently supports LM Studio's local runtime API"
+    import json
+
+    from .transport import TransportError, TransportTimeout, models_url
+
+    try:
+        url = models_url(base_url)
+    except ValueError as exc:
+        raise ProductConfigError(f"model {exc}") from exc
+    try:
+        payload = _transport_request(
+            "GET",
+            url,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=4 * 1024 * 1024,
         )
-    return discovery.active_models
+    except TransportTimeout as exc:
+        raise ModelUnavailable(
+            f"no response from {url} within {timeout_seconds:g}s; is a server running "
+            "there? Pass --base-url for a different server"
+        ) from exc
+    except TransportError as exc:
+        raise ModelUnavailable(f"model catalog unavailable at {url}: {exc}") from exc
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise ModelUnavailable(f"model catalog at {url} is not JSON") from exc
+    rows = document.get("data") if type(document) is dict else None
+    if type(rows) is not list:
+        raise ModelUnavailable(f"model catalog at {url} has no data array")
+    models = {
+        row["id"]
+        for row in rows
+        if type(row) is dict and type(row.get("id")) is str and row["id"].strip()
+    }
+    return tuple(sorted(models))
 
 
-def require_active_model(profile: ModelProfile) -> RuntimeDiscovery:
-    """Fail before source acquisition unless the exact configured model is active."""
+def require_model_available(profile: ModelProfile) -> tuple[str, ...]:
+    """Fail before source acquisition unless the server lists the configured model.
 
-    discovery = discover_local_runtime(profile.endpoint)
-    if discovery.provider != profile.runtime or not discovery.active_state_verified:
-        raise LocalModelUnavailable(
-            f"configured runtime {profile.runtime!r} cannot prove active model state at "
-            f"{profile.endpoint}"
+    Listing is the portable readiness signal. Routers and gateways load models on
+    demand, so a listed model may still take time on its first request.
+    """
+
+    models = list_served_models(
+        profile.base_url,
+        api_key=profile.api_key(),
+        timeout_seconds=min(float(profile.timeout_seconds), 10.0),
+    )
+    if profile.model not in models:
+        raise ModelUnavailable(
+            f"model {profile.model!r} is not listed at {profile.base_url}; "
+            f"{_model_choices(models)}"
         )
-    if profile.model not in discovery.active_models:
-        active = ", ".join(discovery.active_models) or "none"
-        raise LocalModelUnavailable(
-            f"configured model {profile.model!r} is not active; active models: {active}"
-        )
-    return discovery
+    return models
 
 
 def require_configured_model(config: ProductConfig) -> ModelProfile:
     if config.model is None:
-        raise LocalModelUnavailable(
-            "no local model is configured; run `autotldr setup` and then retry"
+        raise ModelUnavailable(
+            "no model server is configured; run `autotldr setup` and then retry"
         )
     return config.model
 
 
 def probe_model_profile(profile: ModelProfile) -> dict[str, object]:
-    """Run one bounded, source-free grounding probe against an active model.
+    """Run one bounded, source-free grounding probe against the configured model.
 
-    Catalog presence alone does not prove that a runtime accepts AutoTLDR's request or
-    returns the strict response envelope.  The probe uses synthetic public text, invokes
-    no model lifecycle operation, and returns only conformance metadata.
+    Catalog presence alone does not prove that a server accepts AutoTLDR's request or
+    returns a usable response.  The probe sends synthetic public text only.
     """
 
-    require_active_model(profile)
+    require_model_available(profile)
     from .api import assemble_collection
     from .router import extract_stdin
-    from .synthesis import EndpointPolicy, SynthesisConfig, synthesize
+    from .synthesis import SynthesisConfig, synthesize
 
     leaf = extract_stdin(
-        b"# AutoTLDR doctor\n\nThe diagnostic fixture states that the probe is local.\n",
+        b"# AutoTLDR doctor\n\nThe diagnostic fixture states that the probe succeeded.\n",
         kind="markdown",
     )
     collection = assemble_collection((leaf,), subject="<autotldr-doctor>")
@@ -399,10 +355,10 @@ def probe_model_profile(profile: ModelProfile) -> dict[str, object]:
         collection,
         SynthesisConfig(
             model=profile.model,
-            endpoint=profile.endpoint,
-            endpoint_policy=EndpointPolicy(),
+            endpoint=profile.base_url,
+            api_key=profile.api_key(),
             evidence_budget_bytes=4_096,
-            timeout_seconds=min(float(profile.timeout_seconds), 30.0),
+            timeout_seconds=float(profile.timeout_seconds),
             max_output_tokens=DETAIL_PROFILES["brief"].max_output_tokens,
             max_claims=1,
             reasoning_effort=DETAIL_PROFILES["brief"].reasoning_effort,
@@ -413,7 +369,7 @@ def probe_model_profile(profile: ModelProfile) -> dict[str, object]:
     )
     return {
         "model": profile.model,
-        "endpoint": profile.endpoint,
+        "base_url": profile.base_url,
         "claims": len(result.extraction.summary_claims),
         "outcome": "accepted",
     }
@@ -468,17 +424,22 @@ def _config_from_mapping(
     if model_data is not None:
         if type(model_data) is not dict:
             raise ProductConfigError("model must be a TOML table")
+        if "endpoint" in model_data or "runtime" in model_data:
+            raise ProductConfigError(
+                "model.endpoint and model.runtime were replaced by model.base_url; "
+                "rerun `autotldr setup --force`"
+            )
         if extras := sorted(
-            set(model_data) - {"endpoint", "name", "timeout_seconds", "runtime"}
+            set(model_data) - {"base_url", "name", "timeout_seconds", "api_key_env"}
         ):
             raise ProductConfigError(f"unknown model key: {extras[0]}")
-        if "endpoint" not in model_data or "name" not in model_data:
-            raise ProductConfigError("model.endpoint and model.name are required")
+        if "base_url" not in model_data or "name" not in model_data:
+            raise ProductConfigError("model.base_url and model.name are required")
         model = ModelProfile(
-            endpoint=model_data["endpoint"],
+            base_url=model_data["base_url"],
             model=model_data["name"],
             timeout_seconds=model_data.get("timeout_seconds", 120.0),
-            runtime=model_data.get("runtime", "lm-studio"),
+            api_key_env=model_data.get("api_key_env"),
         )
 
     extensions_data = data.get("extensions", {})
@@ -498,106 +459,36 @@ def _config_from_mapping(
     )
 
 
-def _local_endpoint(value: object) -> str:
-    if type(value) is not str or not value or value.strip() != value:
-        raise ProductConfigError("model endpoint must be a non-empty URL")
-    if value != DEFAULT_LOCAL_ENDPOINT:
-        raise ProductConfigError(
-            f"alpha model endpoint must be exactly {DEFAULT_LOCAL_ENDPOINT}; "
-            "other local endpoints are not yet certified"
-        )
-    return value
+def _transport_request(method: str, url: str, **kwargs: Any) -> bytes:
+    from .transport import request
+
+    return request(method, url, **kwargs)
 
 
-def _read_runtime_json(
-    url: str,
-    *,
-    timeout_seconds: float,
-    maximum_bytes: int,
-    label: str,
-) -> object:
-    import json
-    import urllib.error
-    import urllib.request
-
-    request = urllib.request.Request(
-        url,
-        headers={"Accept": "application/json", "User-Agent": "AutoTLDR/setup"},
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            if response.status != 200:
-                raise LocalModelUnavailable(
-                    f"{label} returned HTTP {response.status}"
-                )
-            payload = response.read(maximum_bytes + 1)
-    except (OSError, urllib.error.URLError) as exc:
-        raise LocalModelUnavailable(f"{label} did not respond at {url}") from exc
-    if len(payload) > maximum_bytes:
-        raise LocalModelUnavailable(f"{label} exceeded {maximum_bytes} bytes")
-    try:
-        return json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LocalModelUnavailable(f"{label} was not valid UTF-8 JSON") from exc
-
-
-def _lm_studio_active_models(document: object) -> tuple[str, ...]:
-    if type(document) is not dict or type(document.get("models")) is not list:
-        raise LocalModelUnavailable("LM Studio runtime inventory has an unsupported envelope")
-    loaded: list[tuple[str, str]] = []
-    for row in document["models"]:
-        if type(row) is not dict:
-            raise LocalModelUnavailable("LM Studio runtime inventory contains an invalid row")
-        key = row.get("key")
-        model_type = row.get("type")
-        instances = row.get("loaded_instances")
-        if type(key) is not str or type(model_type) is not str or type(instances) is not list:
-            raise LocalModelUnavailable("LM Studio runtime inventory contains an invalid model")
-        if model_type != "llm":
-            continue
-        for instance in instances:
-            if type(instance) is not dict or type(instance.get("id")) is not str:
-                raise LocalModelUnavailable(
-                    "LM Studio runtime inventory contains an invalid loaded instance"
-                )
-            identifier = instance["id"]
-            if not identifier or identifier.strip() != identifier:
-                raise LocalModelUnavailable(
-                    "LM Studio runtime inventory contains an invalid loaded model ID"
-                )
-            loaded.append((key, identifier))
-    identifiers = [identifier for _key, identifier in loaded]
-    if len(identifiers) != len(set(identifiers)):
-        raise LocalModelUnavailable("LM Studio reports duplicate loaded model IDs")
-    # A directly loaded local instance uses the catalog model key as its request
-    # identity. LM Link/Dynamo and other routed instances expose a different
-    # instance ID under the catalog row. The alpha has no provider attestation
-    # for those routes, so they are ineligible rather than merely lower priority.
-    # Duplicate request identities were already rejected across every loaded LLM
-    # row above, before this eligibility filter can hide a routed collision.
-    active = [identifier for key, identifier in loaded if identifier == key]
-    return tuple(sorted(active))
+def _model_choices(models: tuple[str, ...]) -> str:
+    if not models:
+        return "the server lists no models"
+    shown = ", ".join(models[:20])
+    more = f" (and {len(models) - 20} more)" if len(models) > 20 else ""
+    return f"available: {shown}{more}"
 
 
 __all__ = [
     "CONFIG_VERSION",
-    "DEFAULT_LOCAL_ENDPOINT",
+    "DEFAULT_BASE_URL",
     "DETAIL_NAMES",
     "DETAIL_PROFILES",
     "DetailProfile",
-    "LocalModelUnavailable",
     "ModelProfile",
+    "ModelUnavailable",
     "ProductConfig",
     "ProductConfigError",
-    "RuntimeDiscovery",
-    "discover_local_runtime",
-    "discover_served_models",
+    "list_served_models",
     "load_product_config",
     "project_config_path",
     "probe_model_profile",
     "require_configured_model",
-    "require_active_model",
+    "require_model_available",
     "user_config_path",
     "write_user_model_config",
 ]

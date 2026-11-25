@@ -242,10 +242,10 @@ def _render_budgeted(
     ranked_indexes = _ranked_unit_indexes(result)
     if exhaustive_prefixes:
         best: tuple[int, _Rendered] | None = None
-        prefix_sets: list[set[int]] = []
+        selected: set[int] = set()
         for prefix_size in range(len(ranked_indexes)):
-            selected = set(ranked_indexes[:prefix_size])
-            prefix_sets.append(selected)
+            if prefix_size:
+                selected.add(ranked_indexes[prefix_size - 1])
             candidate = _settle_used(
                 result,
                 selected,
@@ -259,8 +259,10 @@ def _render_budgeted(
         if best is not None:
             return best[1]
         required = min(
-            _retryable_required(result, selected, options, builder, available)
-            for selected in [*prefix_sets, all_indexes]
+            _retryable_required(
+                result, set(ranked_indexes[:size]), options, builder, available,
+            )
+            for size in range(len(ranked_indexes) + 1)
         )
         counter = "binary-byte-v1" if output == "pdf" else COUNTER_NAME
         raise BudgetTooSmall(budget, required, output, counter)
@@ -682,26 +684,31 @@ def _settle_used(
     """Render until the serialized ``used`` field equals the real byte count."""
 
     used = 0
-    for _ in range(20):
-        bundle = _prepare_bundle(
-            result,
-            selected,
-            requested=requested,
-            used=used,
-            available=available,
+    # Selection, graph closure, IDs, and the concrete omission inventory do
+    # not depend on the fixed-point byte counter. Build them once per prefix,
+    # then settle only the serialized count. This preserves exhaustive search
+    # without repeatedly reconstructing the same semantic projection.
+    bundle = _prepare_bundle(
+        result,
+        selected,
+        requested=requested,
+        used=used,
+        available=available,
+    )
+    if options.extension_capabilities is not None:
+        bundle.manifest.setdefault(
+            "extensions",
+            {
+                "schema": "autotldr-explicit-extension-run-v1",
+                "requested": None,
+                "capabilities": options.extension_capabilities,
+            },
         )
-        if options.extension_capabilities is not None:
-            bundle.manifest.setdefault(
-                "extensions",
-                {
-                    "schema": "autotldr-explicit-extension-run-v1",
-                    "requested": None,
-                    "capabilities": options.extension_capabilities,
-                },
-            )
-        if options.extension_renderer is not None:
-            bundle.manifest["extension_renderer"] = options.extension_renderer
-        selected_builder = builder or _BUILDERS[options.output]
+    if options.extension_renderer is not None:
+        bundle.manifest["extension_renderer"] = options.extension_renderer
+    selected_builder = builder or _BUILDERS[options.output]
+    for _ in range(20):
+        bundle.selection["used"] = used
         payload = selected_builder(bundle, options)
         measured = _payload_size(payload)
         if measured == used:
@@ -1672,7 +1679,7 @@ def _build_markdown(bundle: Bundle, options: _RenderOptions) -> str:
     ]
     if productized:
         status = (
-            "Cited local-model prose"
+            "Cited model prose"
             if product_mode == "prose"
             else "Deterministic evidence fallback"
             if product_mode == "evidence-fallback"
@@ -1849,7 +1856,7 @@ def _build_ansi(bundle: Bundle, options: _RenderOptions) -> str:
     lines = [paint("1;36", title) + f"  {_ansi_safe(bundle.subject)}"]
     if product_mode is not None:
         status = (
-            "cited local-model prose"
+            "cited model prose"
             if product_mode == "prose"
             else "deterministic evidence fallback"
             if product_mode == "evidence-fallback"

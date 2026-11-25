@@ -981,7 +981,9 @@ def test_crawl_rejects_cross_origin_redirect_before_target_request() -> None:
 def test_cli_model_flag_fails_before_synthesis_import_or_http(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("AUTOTLDR_CONFIG", str(tmp_path / "missing.toml"))
     calls = {"synthesis": 0, "http": 0}
     fake_synthesis = types.ModuleType("autotldr.synthesis")
 
@@ -1003,5 +1005,4 @@ def test_cli_model_flag_fails_before_synthesis_import_or_http(
 
     assert raised.value.code == 2
     assert calls == {"synthesis": 0, "http": 0}
-    assert "cannot prove ZBook-local routing" in captured.err
-    assert "run_local_candidates.py" in captured.err
+    assert "--model ID needs a configured server" in captured.err

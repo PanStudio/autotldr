@@ -10,6 +10,116 @@ that names the entry it replaces.
 
 ---
 
+## 2026-09-17 · Inference borrowed from any OpenAI-compatible server
+
+### D-056 · One OpenAI-compatible transport replaces the loopback runtime profiles
+
+**Decided.** AutoTLDR's core (acquisition, extraction, fusion, validation, rendering)
+stays local. Prose generation calls one configured OpenAI-compatible server: `base_url`
+(http or https, any host), an exact model `name`, an optional `api_key_env`, and a request
+timeout. The LM Studio loopback profile, the ZBook-only endpoint policy, the transport
+attestation, and the raw-socket client are removed; LM Studio is simply the default base
+URL. Readiness is the server's `/models` catalog plus the `doctor` test request, not a
+provider-specific loaded-state inventory. Responses must name the configured model,
+finish with `stop`, and carry one assistant message with no refusal or tool call; other
+provider fields are ignored and reasoning is hashed, never cited. Records move to
+`autotldr-model-run-v3`.
+
+**Why.** The owner's inference runs on homelab nodes behind a LiteLLM gateway and on a
+llama.cpp router. Binding the product to numeric loopback forced an SSH tunnel and a
+provider-specific response profile for each server, while none of those restrictions
+protected claim grounding, which is enforced after the response arrives.
+
+**Rejected.** An explicit llama.cpp loopback profile reached through an SSH tunnel. It
+required per-provider response whitelists, refused gateways and on-demand loading, and
+added operational steps without improving grounding.
+
+**Consequences.** The frozen Stage 5 synthesis benchmark required the ZBook transport and
+v2 records. Its live `run-model` phase is archived; policies, hashes, and freeze
+reproduction remain as historical evidence, and any new live benchmark is a new version.
+The ZBook role-benchmark lifecycle tooling is unaffected.
+
+### D-055 · The next release is 0.2.0
+
+**Decided.** `v0.1.0a1` and `v0.1.1` are already tagged, so the release carrying D-056 is
+`0.2.0`. A lower `0.1.0` would sort below an existing tag. D-044's five-observed-user
+gate remains a follow-up research plan; publication follows owner acceptance and passing
+CI for the exact commit.
+
+## 2026-09-16 · Public-release audit
+
+### D-054 · Runtime discovery uses the same direct transport boundary as generation
+
+**Decided.** Model inventory and readiness requests connect directly to the configured
+loopback endpoint, ignore environment proxies, and reject redirects. Responses remain
+size-bounded; transport and JSON failures become explicit runtime-unavailable results.
+
+**Why.** Generation already enforced this boundary, but discovery used a general URL
+opener that could route through a proxy or follow a redirect. A catalog received from a
+different server cannot establish the identity or readiness of the intended local model.
+
+**Limits.** Direct transport establishes the contacted endpoint, not independent physical
+GPU residency. The exact endpoint and eligible model restrictions remain unchanged.
+
+### D-053 · Persisted task results retain their original source authority
+
+**Decided.** Deferred MCP tasks persist the creating server's roots and re-resolve sources
+against that authority immediately before execution. Access to an existing task checks its
+original canonical source paths against the requesting server's roots without resolving
+those stored paths again. A later symlink replacement cannot transfer ownership of an
+already-computed private result to a different source tree.
+
+**Why.** The audit reproduced both a deferred execution escape and a cross-root result
+disclosure after replacing a queued/completed task's path with a symlink. Validation only
+at task creation, or only against a result's current filesystem resolution, is insufficient.
+
+**Limits.** This remains a process-level path authorization guard, not an operating-system
+sandbox against concurrent hostile filesystem mutation. Source snapshots and OS permissions
+remain part of the documented security boundary.
+
+### D-052 · A watch cache entry includes product policy and successful publication
+
+**Decided.** Watch may reuse a per-file artifact only when source bytes, root identity,
+package version, resolved product configuration, detail, model mode, fallback policy, and
+output budget match; the prior result succeeded; and the artifact exists. Failed files and
+failed roll-ups are retried on the next scan. A roll-up includes addressed findings for
+failed members. A hash measured before acquisition must match the actual acquired snapshot
+before its artifact can be cached as successful.
+
+**Why.** Content-only suppression reproduced stale detail/budget artifacts, unrepaired
+deleted outputs, persistent transient failures, and a success exit on a second scan with an
+unchanged failed file. The byte ceiling and shared product policy apply to cached runs too.
+
+**Limits.** Continuous mode schedules scans on observed source changes; it does not retry a
+failing local model on a background timer. An explicit `watch --once` or a later changed
+batch retries failures. Existing last-good artifacts remain available with errors recorded
+in durable status if a replacement cannot be published.
+
+### D-051 · Spreadsheet dependencies come from native formula operands and sparse cells
+
+**Decided.** XLSX reference recognition uses openpyxl's native tokenizer. Text literals and
+function names never become cell dependencies. Direct A1 references preserve native sheet
+identity and case-insensitive address semantics; ranges include every populated cell within
+their bounds, using a sparse row index. Unsupported names, table references, external/3-D
+targets, dynamic references, and intersections produce addressed unresolved findings.
+Intersections do not emit a speculative union of dependencies. No formulas are evaluated.
+
+ZIP/XML work and native allocations are bounded before loading. XML detection includes
+renamed package parts. Merged regions and hyperlink ranges share an allocation ceiling;
+worksheet reading uses the native sparse cell map instead of materializing a rectangle of
+empty cells. Named work limits fail explicitly instead of truncating the graph.
+
+**Why.** The audit reproduced invented references from `"B7"` and `LOG10`, incorrectly
+decoded apostrophes in sheet names, missing interior range dependencies and cycles, and
+tiny workbooks whose sparse dimensions or relationship ranges could allocate billions of
+cells. A formula graph with invented or silently omitted dependencies breaks the product's
+central semantic promise.
+
+**Limits.** Static native references are not a full Excel calculation engine. Named ranges,
+structured table references, dynamic target resolution, and intersection evaluation require
+separate measured work. The existing scored corpora, roles, and fusion policy remain frozen;
+these fixes have independent regression workbooks.
+
 ## 2026-08-31 · Productization
 
 ### D-050 · Model eligibility filtering cannot hide request-identity ambiguity

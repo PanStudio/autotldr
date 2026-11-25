@@ -1,11 +1,42 @@
 # Changelog
 
-AutoTLDR is pre-alpha. Nothing is stable yet, and this record names product-level changes
-rather than promising semantic-version compatibility.
+Commands, configuration, and output schemas may evolve during 0.x development. Entries
+before 0.2.0 record development checkpoints.
 
-## Unreleased
+## 0.2.0 — any OpenAI-compatible inference server — unreleased
 
-No changes yet.
+- Replaced the LM Studio-only loopback transport with one OpenAI-compatible HTTP client.
+  Configure `base_url`, `name`, optional `api_key_env`, and `timeout_seconds`; http and
+  https servers anywhere on your network work, including authenticated gateways (D-056).
+- `autotldr setup --base-url URL [--model ID] [--api-key-env NAME]` checks the server's
+  `/models` catalog. `--model ID` on an ordinary run overrides the configured model name.
+- Response validation now ignores server-specific extras and requires only the fields
+  that carry authority: the configured model identity, a `stop` finish, one assistant
+  message, and no refusal or tool call. Reasoning channels are hashed, never cited.
+- Model-run records are `autotldr-model-run-v3`; detail profiles are v2 and no longer cap
+  the configured request timeout.
+- Breaking: `[model] endpoint` and `runtime` are replaced by `base_url`; rerun
+  `autotldr setup --force`. The MCP error code is now `MODEL_UNAVAILABLE`.
+- Archived the frozen Stage 5 synthesis benchmark's live run, which depended on the
+  removed ZBook transport; its policies and freeze reproduction remain.
+
+- Corrected spreadsheet dependencies using native formula tokens: strings and function
+  names cannot invent cell references, quoted sheet names retain their identity, and ranges
+  include populated interior cells. Unresolved reference forms become addressed findings.
+- Bounded workbook package/XML processing and native cell expansion, including renamed XML
+  parts, merged regions, hyperlinks, and sparse worksheets at Excel's maximum address.
+- Made watch cache reuse depend on product policy as well as source bytes. Failed files,
+  failed roll-ups, and missing artifacts are retried; failed members appear in the roll-up.
+- Bounded snapshot copying and watch hashing when local files grow during acquisition;
+  successful watch artifacts must match the bytes whose hash was recorded.
+- Bound deferred MCP execution and persisted task access to their original source
+  authority, and contained malformed JSON without stopping the stdio server.
+- Updated the live benchmark evaluator to read inert Markdown omission records while
+  preserving the historical framing and frozen evaluation artifacts.
+- Removed quadratic prefix-set storage and repeated projection work from exact budget
+  rendering without changing selection or omission semantics.
+- Corrected checkout onboarding, clarified byte budgets, and made CI use locked
+  dependencies and retain test/build evidence.
 
 ## 0.1.1 — audited private-alpha checkpoint — 2026-08-31
 

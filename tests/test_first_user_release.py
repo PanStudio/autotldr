@@ -1,4 +1,4 @@
-"""Private-alpha artifacts must be installable, privacy-safe, and gateable."""
+"""Release artifacts must be installable, privacy-safe, and gateable."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 
 
-def _fake_distributions(root: Path, *, version: str = "0.1.1") -> Path:
+def _fake_distributions(root: Path, *, version: str = "0.1.0") -> Path:
     root.mkdir()
     wheel = root / f"autotldr-{version}-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
@@ -70,10 +70,10 @@ def _write_sessions(root: Path) -> list[Path]:
     return paths
 
 
-def test_private_alpha_bundle_is_versioned_checksummed_and_reproducible(tmp_path):
+def test_release_bundle_is_versioned_checksummed_and_reproducible(tmp_path):
     repository = Path(__file__).resolve().parents[1]
     dist = _fake_distributions(tmp_path / "dist")
-    script = repository / "scripts" / "build_alpha_bundle.py"
+    script = repository / "scripts" / "build_release_bundle.py"
     support = "private GitHub security advisory"
     outputs = [tmp_path / "bundle-one", tmp_path / "bundle-two"]
     reports = []
@@ -96,11 +96,11 @@ def test_private_alpha_bundle_is_versioned_checksummed_and_reproducible(tmp_path
 
     first = outputs[0]
     manifest = json.loads((first / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema"] == "autotldr-private-alpha-bundle-v1"
-    assert manifest["version"] == "0.1.1"
+    assert manifest["schema"] == "autotldr-release-bundle-v1"
+    assert manifest["version"] == "0.1.0"
     assert manifest["support"] == support
     guide = (first / "README.md").read_text(encoding="utf-8")
-    assert "AutoTLDR 0.1.1 private-alpha guide" in guide
+    assert "AutoTLDR 0.1.0 installation guide" in guide
     assert support in guide
     assert "{{" not in guide
 
@@ -116,7 +116,7 @@ def test_private_alpha_bundle_is_versioned_checksummed_and_reproducible(tmp_path
     with zipfile.ZipFile(str(first) + ".zip") as archive:
         names = archive.namelist()
     assert names
-    assert all(name.startswith("autotldr-0.1.1-private-alpha/") for name in names)
+    assert all(name.startswith("autotldr-0.1.0/") for name in names)
 
     refused = subprocess.run(
         [

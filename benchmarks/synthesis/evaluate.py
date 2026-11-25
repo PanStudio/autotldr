@@ -18,10 +18,13 @@ This evaluator has three deliberately separate phases:
     preregistered hard gates, and rank eligible candidates lexicographically.
     Aggregate accuracy is neither computed nor used.
 
-The default endpoint is the frozen ZBook-local LM Studio wire.  This module
-does not load or unload models; ``run_local_candidates.py`` owns that guarded
-lifecycle and invokes ``run-model`` only while ZBook is the verified preferred
-LM Link device.
+Archived in AutoTLDR 0.2.0.  This benchmark was frozen around the retired
+ZBook-local LM Studio transport and its ``autotldr-model-run-v2`` records.  The
+product now speaks to any OpenAI-compatible server and writes v3 records, so the
+live ``run-model`` phase refuses to run rather than produce records this frozen
+evaluator was never preregistered to judge.  Freezes still rebuild the exact
+pre-output request bytes, and policy files, hashes, and record validation stay
+intact as historical evidence.
 """
 
 from __future__ import annotations
@@ -1050,17 +1053,22 @@ def build_hero_extraction(hero_dir: Path = HERO_DIR) -> Any:
     return result
 
 
+ARCHIVED_MESSAGE = (
+    "the Stage 5 synthesis benchmark is archived: its frozen ZBook-local transport "
+    "was removed in AutoTLDR 0.2.0; create a new benchmark version for live runs"
+)
+
+
 def synthesis_config(policy: Mapping[str, Any], model_id: str) -> Any:
     """Build the exact production configuration used for every repeat."""
 
-    from autotldr.synthesis import EndpointPolicy, SynthesisConfig
+    from autotldr.synthesis import SynthesisConfig
 
     generation = policy["generation"]
     evidence = policy["evidence_pack"]
     return SynthesisConfig(
         model=model_id,
         endpoint=policy["endpoint"],
-        endpoint_policy=EndpointPolicy(localhost_only=True, allowed_schemes=("http",)),
         evidence_budget_bytes=evidence["max_bytes"],
         timeout_seconds=RUN_TIMEOUT_SECONDS,
         max_output_tokens=generation["max_tokens"],
@@ -1413,6 +1421,7 @@ def run_candidate(
 ) -> dict[str, Any]:
     """Run exactly two no-fallback repeats and publish one audited artifact."""
 
+    raise EvaluationError(ARCHIVED_MESSAGE)
     if output_path.exists():
         raise EvaluationError(f"refusing to overwrite candidate artifact {output_path}")
     freeze = read_freeze(freeze_path)
@@ -1655,7 +1664,8 @@ def _require_model_manifest(
     ):
         raise EvaluationError("model manifest record self-hash is invalid")
 
-    from autotldr.synthesis import MODEL_RUN_SCHEMA, SYNTHESIS_TASK
+    # Frozen identities of the archived v2 record format.
+    MODEL_RUN_SCHEMA, SYNTHESIS_TASK = "autotldr-model-run-v2", "collection-synthesis"
 
     if item["schema"] != MODEL_RUN_SCHEMA:
         raise EvaluationError("model manifest schema is invalid")
@@ -2707,10 +2717,7 @@ class _InjectedFailureClient:
     endpoint_url = "http://127.0.0.1:1234/v1/chat/completions"
 
     def __init__(self, payload: bytes | BaseException) -> None:
-        from autotldr.synthesis import offline_test_transport_attestation
-
         self.payload = payload
-        self.attestation = offline_test_transport_attestation()
 
     def complete(
         self,
@@ -2846,7 +2853,6 @@ def run_failure_injections(
     """Exercise production synthesis with local deterministic failure clients."""
 
     from autotldr.synthesis import (
-        EndpointPolicy,
         SynthesisConfig,
         SynthesisRunError,
         build_evidence_pack,
@@ -2862,7 +2868,6 @@ def run_failure_injections(
     config = SynthesisConfig(
         model="autotldr-stage5-failure-injection",
         endpoint=base_policy["endpoint"],
-        endpoint_policy=EndpointPolicy(localhost_only=True, allowed_schemes=("http",)),
         evidence_budget_bytes=base_policy["evidence_pack"]["max_bytes"],
         timeout_seconds=RUN_TIMEOUT_SECONDS,
         max_output_tokens=base_policy["generation"]["max_tokens"],
@@ -4061,6 +4066,16 @@ def _parse_human_render_audit(
         "statement": [],
     }
     for line_number, line in enumerate(audit_text.splitlines(), start=1):
+        # D-049 renders current Markdown records as inert code spans. Keep
+        # accepting the original framing when auditing historical artifacts;
+        # neither encoding changes the canonical drop-v1 JSON or its digest.
+        if shape == "md" and line.startswith("  - `drop-v1/"):
+            if not line.endswith("`"):
+                errors.append(
+                    f"human renderer has invalid drop-v1 framing on audit line {line_number}"
+                )
+                continue
+            line = "  - " + line[len("  - `") : -1]
         if not line.startswith(record_prefix):
             continue
         kind_and_payload = line.removeprefix(record_prefix)

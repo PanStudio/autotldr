@@ -18,8 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from autotldr.synthesis import offline_test_transport_attestation
-
 ROOT = Path(__file__).resolve().parents[1]
 DEMO_PATH = ROOT / "examples" / "mvp_demo.py"
 
@@ -37,7 +35,6 @@ class _EvidenceAwareClient:
     """Answer with claims that cite real IDs taken from the request itself."""
 
     def __init__(self, *, claims: int = 2) -> None:
-        self.attestation = offline_test_transport_attestation()
         self.calls = 0
         self.requests: list[bytes] = []
         self.claims = claims

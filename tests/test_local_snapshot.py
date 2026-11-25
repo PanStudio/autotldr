@@ -36,6 +36,36 @@ def _restore_times(path: Path, times: os.stat_result) -> None:
     os.utime(path, ns=(times.st_atime_ns, times.st_mtime_ns))
 
 
+@pytest.mark.parametrize("surface", ["invoke", "watch"])
+def test_acquisition_does_not_chase_a_continuously_growing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surface: str,
+) -> None:
+    from autotldr.watch import UnstableSourceError, _hash_snapshot
+
+    source = tmp_path / "growing.txt"
+    source.write_bytes(b"seed")
+    inode = source.stat().st_ino
+    original_read = os.read
+    calls = 0
+
+    def append_before_read(descriptor, maximum):
+        nonlocal calls
+        if os.fstat(descriptor).st_ino == inode:
+            calls += 1
+            assert calls <= 3, "acquisition kept chasing an advancing EOF"
+            with source.open("ab") as stream:
+                stream.write(b"more")
+        return original_read(descriptor, maximum)
+
+    monkeypatch.setattr(os, "read", append_before_read)
+    with pytest.raises((ValueError, UnstableSourceError), match="changed"):
+        if surface == "invoke":
+            router.extract(source)
+        else:
+            _hash_snapshot(source)
+    assert calls <= 2
+
+
 def _assert_closed(result: Extraction, source: Path) -> None:
     assert result.source == str(source)
     units = {unit.id: unit for unit in result.units}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,14 +12,13 @@ import pytest
 from autotldr.cli import main
 from autotldr.product import (
     DETAIL_PROFILES,
-    LocalModelUnavailable,
     ModelProfile,
+    ModelUnavailable,
     ProductConfigError,
-    RuntimeDiscovery,
-    discover_local_runtime,
-    discover_served_models,
+    list_served_models,
     load_product_config,
     probe_model_profile,
+    require_model_available,
     write_user_model_config,
 )
 from autotldr.unit import Extraction, GroundedStatement
@@ -36,11 +36,6 @@ def test_detail_profiles_expand_one_simple_user_choice():
         512,
         1_024,
         1_800,
-    ]
-    assert [item.timeout_seconds for item in DETAIL_PROFILES.values()] == [
-        60.0,
-        90.0,
-        120.0,
     ]
 
 
@@ -74,20 +69,66 @@ def test_unknown_config_key_fails_closed(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "endpoint",
+    "base_url,normalized",
     (
-        "http://localhost:1234",
-        "http://127.0.0.1:1234/v1",
-        "http://127.0.0.1:4321",
-        "https://127.0.0.1:1234",
+        ("http://127.0.0.1:1234", "http://127.0.0.1:1234/v1"),
+        ("http://127.0.0.1:1234/v1/", "http://127.0.0.1:1234/v1"),
+        ("http://mini.tail.ts.net:8080/v1", "http://mini.tail.ts.net:8080/v1"),
+        ("https://Gateway.example:4000", "https://gateway.example:4000/v1"),
+        ("http://192.168.86.20/api/v1", "http://192.168.86.20/api/v1"),
+        ("http://127.0.0.1:1234/v1/chat/completions", "http://127.0.0.1:1234/v1"),
     ),
 )
-def test_alpha_model_profile_accepts_only_the_certified_runtime_endpoint(endpoint):
-    with pytest.raises(ProductConfigError, match="must be exactly"):
-        ModelProfile(endpoint, "served-local")
+def test_model_profile_accepts_any_openai_compatible_base_url(base_url, normalized):
+    assert ModelProfile(base_url, "served").base_url == normalized
 
 
-def test_grounded_probe_uses_strict_transport_and_a_real_brief_completion_budget(
+@pytest.mark.parametrize(
+    "base_url,error",
+    (
+        ("ftp://127.0.0.1/v1", "scheme"),
+        ("http://user:secret@gateway/v1", "credentials"),
+        ("http://gateway/v1?key=secret", "query"),
+        ("http:///v1", "host"),
+        (" http://gateway/v1", "unpadded"),
+    ),
+)
+def test_model_profile_rejects_unusable_or_secret_bearing_urls(base_url, error):
+    with pytest.raises(ProductConfigError, match=error):
+        ModelProfile(base_url, "served")
+
+
+def test_api_key_is_resolved_from_the_environment_and_never_persisted(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AUTOTLDR_CONFIG", str(tmp_path / "config.toml"))
+    profile = ModelProfile("http://gateway:4000", "mini/model", api_key_env="HLAB_KEY")
+    monkeypatch.delenv("HLAB_KEY", raising=False)
+    with pytest.raises(ModelUnavailable, match="HLAB_KEY is not set"):
+        profile.api_key()
+    monkeypatch.setenv("HLAB_KEY", "sk-secret-value")
+    assert profile.api_key() == "sk-secret-value"
+
+    path = write_user_model_config(profile)
+    assert "sk-secret-value" not in path.read_text()
+    assert load_product_config(directory=tmp_path).model == profile
+    with pytest.raises(ProductConfigError, match="environment variable name"):
+        ModelProfile("http://gateway:4000", "m", api_key_env="NOT A NAME")
+
+
+def test_old_runtime_config_gets_an_actionable_error(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'version = 1\n[model]\nendpoint = "http://127.0.0.1:1234"\n'
+        'name = "m"\nruntime = "lm-studio"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUTOTLDR_CONFIG", str(config))
+    with pytest.raises(ProductConfigError, match="setup --force"):
+        load_product_config(directory=tmp_path)
+
+
+def test_grounded_probe_uses_configured_server_and_a_real_brief_completion_budget(
     monkeypatch,
 ):
     import autotldr.product
@@ -98,14 +139,8 @@ def test_grounded_probe_uses_strict_transport_and_a_real_brief_completion_budget
 
     monkeypatch.setattr(
         autotldr.product,
-        "require_active_model",
-        lambda candidate: RuntimeDiscovery(
-            "lm-studio",
-            candidate.endpoint,
-            (candidate.model,),
-            (candidate.model,),
-            True,
-        ),
+        "require_model_available",
+        lambda candidate: (candidate.model,),
     )
 
     def fake_synthesize(extraction, config):
@@ -119,7 +154,7 @@ def test_grounded_probe_uses_strict_transport_and_a_real_brief_completion_budget
             gaps=list(extraction.gaps),
             meta=dict(extraction.meta),
             summary_claims=[
-                GroundedStatement("The probe is local.", (unit.origin,), (unit.id,))
+                GroundedStatement("The probe succeeded.", (unit.origin,), (unit.id,))
             ],
         )
         return SimpleNamespace(extraction=completed)
@@ -130,8 +165,9 @@ def test_grounded_probe_uses_strict_transport_and_a_real_brief_completion_budget
 
     assert report["outcome"] == "accepted"
     assert observed["config"].max_output_tokens == DETAIL_PROFILES["brief"].max_output_tokens
-    assert observed["config"].timeout_seconds == 30.0
-    assert observed["config"].endpoint_policy.strict_zbook_local is True
+    assert observed["config"].timeout_seconds == 120.0
+    assert observed["config"].endpoint == "http://127.0.0.1:1234/v1"
+    assert observed["config"].api_key is None
     assert observed["config"].reasoning_effort == "none"
     assert observed["config"].product_detail == "brief"
     assert observed["config"].include_findings is False
@@ -182,7 +218,7 @@ def test_formats_human_output_names_available_archive_collections(capsys):
     assert "doc-site         available          http://, https://" in rendered
 
 
-def test_default_cli_uses_configured_local_prose_and_detail(
+def test_default_cli_uses_configured_server_prose_and_detail(
     tmp_path, monkeypatch, capsys
 ):
     source = tmp_path / "notes.md"
@@ -222,10 +258,8 @@ def test_default_cli_uses_configured_local_prose_and_detail(
     monkeypatch.setattr(autotldr.synthesis, "synthesize", fake_synthesize)
     monkeypatch.setattr(
         autotldr.product,
-        "require_active_model",
-        lambda profile: RuntimeDiscovery(
-            "lm-studio", profile.endpoint, (profile.model,), (profile.model,), True
-        ),
+        "require_model_available",
+        lambda profile: (profile.model,),
     )
 
     assert main([str(source), "--detail", "deep", "--out", "json"]) == 0
@@ -237,7 +271,7 @@ def test_default_cli_uses_configured_local_prose_and_detail(
     assert observed["config"].evidence_budget_bytes == 48_000
     assert observed["config"].max_output_tokens == 1_800
     assert observed["config"].timeout_seconds == 120.0
-    assert observed["config"].endpoint_policy.strict_zbook_local is True
+    assert observed["config"].endpoint == "http://127.0.0.1:1234/v1"
     assert observed["config"].reasoning_effort == "none"
     assert observed["config"].product_detail == "deep"
     assert observed["config"].include_findings is False
@@ -270,14 +304,8 @@ def test_cli_fallback_is_opt_in_and_labelled_in_the_result(
     monkeypatch.setattr(autotldr.synthesis, "synthesize", fake_synthesize)
     monkeypatch.setattr(
         autotldr.product,
-        "require_active_model",
-        lambda candidate: RuntimeDiscovery(
-            "lm-studio",
-            candidate.endpoint,
-            (candidate.model,),
-            (candidate.model,),
-            True,
-        ),
+        "require_model_available",
+        lambda candidate: (candidate.model,),
     )
 
     assert (
@@ -323,10 +351,10 @@ def test_environment_model_off_is_labelled_evidence_mode(
     monkeypatch.setenv("AUTOTLDR_MODEL", "off")
 
     def unexpected_model_check(*args, **kwargs):
-        raise AssertionError("model-off must not inspect local model residency")
+        raise AssertionError("model-off must not contact the model server")
 
     monkeypatch.setattr(
-        "autotldr.product.require_active_model", unexpected_model_check
+        "autotldr.product.require_model_available", unexpected_model_check
     )
 
     assert main([str(source), "--out", "json"]) == 0
@@ -344,7 +372,7 @@ def test_missing_model_fails_before_source_acquisition(tmp_path, monkeypatch, ca
     assert main([str(missing_source)]) == 1
 
     error = capsys.readouterr().err
-    assert "no local model is configured" in error
+    assert "no model server is configured" in error
     assert "no such file" not in error
 
 
@@ -484,18 +512,16 @@ def test_watch_uses_configured_prose_for_files_and_rollup(
     monkeypatch.setattr(autotldr.synthesis, "synthesize", fake_synthesize)
     monkeypatch.setattr(
         autotldr.product,
-        "require_active_model",
-        lambda profile: RuntimeDiscovery(
-            "lm-studio", profile.endpoint, (profile.model,), (profile.model,), True
-        ),
+        "require_model_available",
+        lambda profile: (profile.model,),
     )
 
     result = run_once(root, detail="brief", budget=250_000)
 
     assert result.succeeded == 1
     assert observed == [("collection", 2), ("collection", 2)]
-    assert "Cited local-model prose" in artifact_path(root, "notes.md").read_text()
-    assert "Cited local-model prose" in (root / ".autotldr" / ROLLUP_NAME).read_text()
+    assert "Cited model prose" in artifact_path(root, "notes.md").read_text()
+    assert "Cited model prose" in (root / ".autotldr" / ROLLUP_NAME).read_text()
 
 
 def test_doctor_requires_catalog_identity_and_grounded_completion_probe(
@@ -509,10 +535,8 @@ def test_doctor_requires_catalog_identity_and_grounded_completion_probe(
 
     monkeypatch.setattr(
         autotldr.product,
-        "discover_local_runtime",
-        lambda endpoint: RuntimeDiscovery(
-            "lm-studio", endpoint, ("served-local",), ("served-local",), True
-        ),
+        "require_model_available",
+        lambda candidate: (candidate.model,),
     )
     observed = []
 
@@ -520,7 +544,7 @@ def test_doctor_requires_catalog_identity_and_grounded_completion_probe(
         observed.append(candidate)
         return {
             "model": candidate.model,
-            "endpoint": candidate.endpoint,
+            "base_url": candidate.base_url,
             "claims": 1,
             "outcome": "accepted",
         }
@@ -571,38 +595,54 @@ def test_root_help_and_config_introspection_are_discoverable(
     assert ".autotldr.toml" in paths
 
 
-def test_setup_has_no_fake_endpoint_choice_and_persists_one_active_model(
+def test_setup_checks_the_catalog_and_persists_server_and_key_name(
     tmp_path, monkeypatch, capsys
 ):
     import autotldr.product
 
     config_path = tmp_path / "config.toml"
     monkeypatch.setenv("AUTOTLDR_CONFIG", str(config_path))
+    monkeypatch.setenv("HLAB_KEY", "sk-test")
     observed = []
 
-    def active_models(endpoint):
-        observed.append(endpoint)
-        return ("active-local",)
+    def catalog(base_url, *, api_key=None, timeout_seconds=10.0):
+        observed.append((base_url, api_key))
+        return ("mini/qwen", "mini/gemma")
 
-    monkeypatch.setattr(autotldr.product, "discover_served_models", active_models)
+    monkeypatch.setattr(autotldr.product, "list_served_models", catalog)
 
     with pytest.raises(SystemExit) as help_exit:
         main(["setup", "--help"])
     assert help_exit.value.code == 0
     setup_help = capsys.readouterr().out
-    assert "--endpoint" not in setup_help
+    assert "--base-url" in setup_help and "--api-key-env" in setup_help
 
-    assert main(["setup", "--detail", "brief"]) == 0
-    assert observed == ["http://127.0.0.1:1234"]
+    assert main(["setup", "--base-url", "http://gateway:4000", "--api-key-env", "HLAB_KEY"]) == 1
+    error = capsys.readouterr().err
+    assert "choose a model with --model ID" in error
+    assert "mini/gemma" in error and "mini/qwen" in error
+    assert not config_path.exists()
+
+    assert main(["setup", "--base-url", "http://gateway:4000", "--model", "mini/absent",
+                 "--api-key-env", "HLAB_KEY"]) == 1
+    assert "not listed" in capsys.readouterr().err
+    assert not config_path.exists()
+
+    assert main([
+        "setup", "--base-url", "http://gateway:4000", "--model", "mini/qwen",
+        "--api-key-env", "HLAB_KEY", "--detail", "brief",
+    ]) == 0
+    assert observed[-1] == ("http://gateway:4000/v1", "sk-test")
     config = load_product_config(directory=tmp_path)
     assert config.detail == "brief"
     assert config.model == ModelProfile(
-        "http://127.0.0.1:1234", "active-local"
+        "http://gateway:4000/v1", "mini/qwen", api_key_env="HLAB_KEY"
     )
+    assert "sk-test" not in config_path.read_text()
     assert "Run `autotldr doctor`" in capsys.readouterr().out
 
 
-def test_setup_requires_explicit_model_when_multiple_are_active(
+def test_setup_selects_the_only_listed_model_on_a_local_server(
     tmp_path, monkeypatch, capsys
 ):
     import autotldr.product
@@ -610,152 +650,177 @@ def test_setup_requires_explicit_model_when_multiple_are_active(
     config_path = tmp_path / "config.toml"
     monkeypatch.setenv("AUTOTLDR_CONFIG", str(config_path))
     monkeypatch.setattr(
-        autotldr.product,
-        "discover_served_models",
-        lambda _endpoint: ("first", "second"),
+        autotldr.product, "list_served_models", lambda *_a, **_k: ("only-model",)
     )
 
-    assert main(["setup"]) == 1
-    error = capsys.readouterr().err
-    assert "multiple generation models are active" in error
-    assert "--model ID" in error
-    assert not config_path.exists()
-
-
-def test_runtime_discovery_never_confuses_catalog_with_active_models(monkeypatch):
-    import autotldr.product as product
-
-    catalog = {
-        "object": "list",
-        "data": [
-            {"id": "loaded-model"},
-            {"id": "downloaded-only"},
-            {"id": "embedding-model"},
-        ],
-    }
-    runtime = {
-        "models": [
-            {
-                "key": "loaded-model",
-                "type": "llm",
-                "loaded_instances": [{"id": "loaded-model"}],
-            },
-            {
-                "key": "downloaded-only",
-                "type": "llm",
-                "loaded_instances": [],
-            },
-            {
-                "key": "embedding-model",
-                "type": "embedding",
-                "loaded_instances": [{"id": "embedding-model"}],
-            },
-        ]
-    }
-
-    def fake_read(url, **_kwargs):
-        return runtime if "/api/" in url else catalog
-
-    monkeypatch.setattr(product, "_read_runtime_json", fake_read)
-
-    discovered = discover_local_runtime("http://127.0.0.1:1234")
-
-    assert discovered.provider == "lm-studio"
-    assert discovered.active_state_verified is True
-    assert discovered.catalog_models == (
-        "downloaded-only",
-        "embedding-model",
-        "loaded-model",
+    assert main(["setup"]) == 0
+    assert load_product_config(directory=tmp_path).model == ModelProfile(
+        "http://127.0.0.1:1234/v1", "only-model"
     )
-    assert discovered.active_models == ("loaded-model",)
-    assert discover_served_models("http://127.0.0.1:1234") == ("loaded-model",)
 
 
-def test_runtime_discovery_excludes_routed_instance_whose_id_differs_from_key(
-    monkeypatch,
+def test_cli_model_id_overrides_only_the_configured_model_name(
+    tmp_path, monkeypatch, capsys
 ):
-    import autotldr.product as product
+    source = tmp_path / "notes.md"
+    source.write_text("# Notes\n\nEvidence.\n", encoding="utf-8")
+    monkeypatch.setenv("AUTOTLDR_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.delenv("AUTOTLDR_MODEL", raising=False)
+    write_user_model_config(ModelProfile("http://gateway:4000", "mini/qwen"))
+    observed = {}
 
-    catalog = {
-        "object": "list",
-        "data": [
-            {"id": "local-model"},
-            {"id": "qwen-on-dynamo"},
-        ],
-    }
-    runtime = {
-        "models": [
-            {
-                "key": "local-model",
-                "type": "llm",
-                "loaded_instances": [{"id": "local-model"}],
-            },
-            {
-                "key": "qwen-catalog-key",
-                "type": "llm",
-                "loaded_instances": [{"id": "qwen-on-dynamo"}],
-            },
-        ]
-    }
-
-    monkeypatch.setattr(
-        product,
-        "_read_runtime_json",
-        lambda url, **_kwargs: runtime if "/api/" in url else catalog,
-    )
-
-    discovered = discover_local_runtime("http://127.0.0.1:1234")
-
-    assert discovered.active_models == ("local-model",)
-    assert discover_served_models("http://127.0.0.1:1234") == ("local-model",)
-
-
-def test_runtime_discovery_rejects_direct_and_routed_loaded_id_collision(
-    monkeypatch,
-):
-    import autotldr.product as product
-
-    catalog = {
-        "object": "list",
-        "data": [{"id": "local-model"}],
-    }
-    runtime = {
-        "models": [
-            {
-                "key": "local-model",
-                "type": "llm",
-                "loaded_instances": [{"id": "local-model"}],
-            },
-            {
-                "key": "remote-route",
-                "type": "llm",
-                "loaded_instances": [{"id": "local-model"}],
-            },
-        ]
-    }
-    monkeypatch.setattr(
-        product,
-        "_read_runtime_json",
-        lambda url, **_kwargs: runtime if "/api/" in url else catalog,
-    )
-
-    with pytest.raises(LocalModelUnavailable, match="duplicate loaded model IDs"):
-        discover_local_runtime("http://127.0.0.1:1234")
-
-
-def test_setup_refuses_explicit_routed_instance(tmp_path, monkeypatch, capsys):
     import autotldr.product
+    import autotldr.synthesis
 
-    config_path = tmp_path / "config.toml"
-    monkeypatch.setenv("AUTOTLDR_CONFIG", str(config_path))
+    def fake_synthesize(extraction, config):
+        observed["config"] = config
+        return SimpleNamespace(extraction=extraction, used_fallback=True)
+
+    monkeypatch.setattr(autotldr.synthesis, "synthesize", fake_synthesize)
     monkeypatch.setattr(
-        autotldr.product,
-        "discover_served_models",
-        lambda _endpoint: ("local-model",),
+        autotldr.product, "require_model_available", lambda profile: (profile.model,)
     )
 
-    assert main(["setup", "--model", "qwen-on-dynamo"]) == 1
-    error = capsys.readouterr().err
-    assert "not active" in error
-    assert "local-model" in error
-    assert not config_path.exists()
+    assert main([str(source), "--model", "dynamo/gemma", "--allow-evidence-fallback",
+                 "--out", "json"]) == 0
+    assert observed["config"].model == "dynamo/gemma"
+    assert observed["config"].endpoint == "http://gateway:4000/v1"
+
+    monkeypatch.setenv("AUTOTLDR_CONFIG", str(tmp_path / "missing.toml"))
+    with pytest.raises(SystemExit) as unconfigured:
+        main([str(source), "--model", "dynamo/gemma"])
+    assert unconfigured.value.code == 2
+
+
+class _OpenAIServer:
+    """A real loopback HTTP server that speaks the OpenAI subset AutoTLDR uses."""
+
+    def __init__(self, *, models=("served",), key=None, redirect=False, reply=None):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.requests = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _auth_ok(self):
+                return key is None or self.headers.get("Authorization") == f"Bearer {key}"
+
+            def _send(self, status, payload, headers=()):
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                outer.requests.append(("GET", self.path, self.headers.get("Authorization"), None))
+                if redirect:
+                    self._send(302, {}, [("Location", "http://127.0.0.1:9/v1/models")])
+                elif not self._auth_ok():
+                    self._send(401, {"error": {"message": "Invalid API key"}})
+                else:
+                    self._send(200, {"object": "list", "data": [
+                        {"id": model, "object": "model", "owned_by": "anyone",
+                         "status": {"value": "unloaded"}} for model in models]})
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                outer.requests.append(("POST", self.path, self.headers.get("Authorization"), body))
+                if not self._auth_ok():
+                    self._send(401, {"error": {"message": "Invalid API key"}})
+                    return
+                self._send(200, reply(json.loads(body)))
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}/v1"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
+def test_catalog_uses_bearer_auth_and_ignores_router_specific_fields(monkeypatch):
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    with _OpenAIServer(models=("b", "a"), key="sk-lab") as server:
+        assert list_served_models(server.base_url, api_key="sk-lab") == ("a", "b")
+        assert server.requests[-1][:3] == ("GET", "/v1/models", "Bearer sk-lab")
+        with pytest.raises(ModelUnavailable, match="HTTP 401.*Invalid API key"):
+            list_served_models(server.base_url, api_key="wrong")
+        monkeypatch.setenv("LAB_KEY", "sk-lab")
+        with pytest.raises(ModelUnavailable, match="not listed.*available: a, b"):
+            require_model_available(ModelProfile(server.base_url, "c", api_key_env="LAB_KEY"))
+
+
+def test_catalog_never_follows_redirects(monkeypatch):
+    with _OpenAIServer(redirect=True) as server:
+        with pytest.raises(ModelUnavailable, match="HTTP 302"):
+            list_served_models(server.base_url)
+        assert [request[1] for request in server.requests] == ["/v1/models"]
+
+
+def test_prose_round_trips_through_a_real_openai_compatible_server(
+    tmp_path, monkeypatch, capsys
+):
+    """Gateway-shaped extras are ignored; reasoning is hashed, never cited."""
+
+    source = tmp_path / "notes.md"
+    source.write_text("# Cooling\n\nKeep pressure below 240 kPa.\n", encoding="utf-8")
+    monkeypatch.setenv("AUTOTLDR_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setenv("LAB_KEY", "sk-lab")
+    monkeypatch.delenv("AUTOTLDR_MODEL", raising=False)
+
+    def reply(request):
+        pack = json.loads(request["messages"][1]["content"].split("\n", 1)[1])
+        unit = next(
+            item for item in pack["evidence"]["units"] if "240 kPa" in item["content"]
+        )
+        claims = {"claims": [{"content": "Pressure must stay below 240 kPa.",
+                              "evidence_unit_ids": [unit["id"]]}]}
+        return {
+            "id": "chatcmpl-gateway", "object": "chat.completion", "created": 1,
+            "model": request["model"], "system_fingerprint": "b1-test",
+            "choices": [{"index": 0, "finish_reason": "stop", "provider_specific_fields": {},
+                         "message": {"role": "assistant", "content": json.dumps(claims),
+                                     "reasoning_content": "PRIVATE THOUGHTS",
+                                     "provider_specific_fields": {"refusal": None}}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+                      "prompt_tokens_details": {"cached_tokens": 0}},
+            "timings": {"prompt_n": 10, "predicted_ms": 1.5},
+        }
+
+    with _OpenAIServer(models=("mini/qwen",), key="sk-lab", reply=reply) as server:
+        write_user_model_config(
+            ModelProfile(server.base_url, "mini/qwen", api_key_env="LAB_KEY")
+        )
+        assert main([str(source), "--detail", "brief", "--out", "json"]) == 0
+        posts = [request for request in server.requests if request[0] == "POST"]
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [claim["content"] for claim in payload["summary_claims"]] == [
+        "Pressure must stay below 240 kPa."
+    ]
+    assert len(posts) == 1
+    assert posts[0][1:3] == ("/v1/chat/completions", "Bearer sk-lab")
+    assert json.loads(posts[0][3])["reasoning_effort"] == "none"
+    run = payload["manifest"]["models"][-1]
+    assert run["schema"] == "autotldr-model-run-v3"
+    assert run["endpoint"] == f"{server.base_url}/chat/completions"
+    assert run["transport"] == {"implementation": "http-client-v1", "authorization": "bearer"}
+    assert run["response_facts"]["reasoning"]["bytes"] == len("PRIVATE THOUGHTS")
+    serialized = json.dumps(payload)
+    assert "PRIVATE THOUGHTS" not in serialized
+    assert "sk-lab" not in serialized

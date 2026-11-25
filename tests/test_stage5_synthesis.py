@@ -14,7 +14,6 @@ from autotldr.synthesis import (
     MAX_CLAIM_BYTES,
     MAX_EVIDENCE_UNITS,
     EvidenceBudgetError,
-    EndpointPolicy,
     OpenAICompatibleClient,
     ResponseEnvelope,
     SynthesisClientError,
@@ -26,7 +25,6 @@ from autotldr.synthesis import (
     build_chat_request,
     build_evidence_pack,
     extract_response_content,
-    offline_test_transport_attestation,
     synthesize,
     validate_synthesis_response,
 )
@@ -389,7 +387,7 @@ def _reference_fanout_collection(*, reverse: bool = False) -> Extraction:
 def _api_response(
     content: str,
     *,
-    model: str = "zbook-local/exact-model-id",
+    model: str = "lab/exact-model-id",
     finish_reason: str | None = "stop",
     message_role: str = "assistant",
     message_extra: dict | None = None,
@@ -452,7 +450,6 @@ class _StaticClient:
     def __init__(self, response: bytes | BaseException) -> None:
         self.response = response
         self.requests: list[tuple[bytes, float, int]] = []
-        self.attestation = offline_test_transport_attestation()
 
     def complete(
         self,
@@ -470,7 +467,6 @@ class _StaticClient:
 class _NonBytesClient:
     def __init__(self, value) -> None:
         self.value = value
-        self.attestation = offline_test_transport_attestation()
 
     def complete(self, request_body: bytes, *, timeout_seconds: float, max_response_bytes: int):
         return self.value
@@ -478,7 +474,7 @@ class _NonBytesClient:
 
 def _config(**changes) -> SynthesisConfig:
     base = SynthesisConfig(
-        model="zbook-local/exact-model-id",
+        model="lab/exact-model-id",
         evidence_budget_bytes=8_000,
         timeout_seconds=4.5,
         max_output_tokens=180,
@@ -1285,10 +1281,8 @@ def test_success_derives_origins_applies_claims_and_records_complete_run():
     assert set(run) == {
         "schema",
         "task",
-        "endpoint_class",
         "endpoint",
         "transport",
-        "endpoint_policy",
         "model",
         "settings",
         "input",
@@ -1302,25 +1296,14 @@ def test_success_derives_origins_applies_claims_and_records_complete_run():
         "claim_ids",
         "record_sha256",
     }
-    assert run["schema"] == "autotldr-model-run-v2"
+    assert run["schema"] == "autotldr-model-run-v3"
     assert run["task"] == "collection-synthesis"
-    assert run["endpoint_class"] == "openai-compatible-zbook-local"
     assert run["endpoint"] == "http://127.0.0.1:1234/v1/chat/completions"
-    assert run["endpoint_policy"] == {
-        "localhost_only": True,
-        "allowed_schemes": ["http"],
-        "strict_zbook_local": True,
-    }
     assert run["transport"] == {
-        "endpoint_url": "http://127.0.0.1:1234/v1/chat/completions",
-        "endpoint_class": "openai-compatible-zbook-local",
-        "implementation": "offline-injected-test-v1",
-        "proxy_policy": "caller-attested-disabled",
-        "redirect_policy": "caller-attested-disabled",
-        "peer_requirement": "127.0.0.1",
-        "deadline_policy": "caller-attested-absolute-monotonic",
+        "implementation": "injected-client",
+        "authorization": "none",
     }
-    assert run["model"] == "zbook-local/exact-model-id"
+    assert run["model"] == "lab/exact-model-id"
     assert run["settings"]["temperature"] == 0.0
     assert run["settings"]["seed"] == 17
     assert run["input"]["sha256"] == hashlib.sha256(request_body).hexdigest()
@@ -1333,7 +1316,7 @@ def test_success_derives_origins_applies_claims_and_records_complete_run():
     assert run["response_facts"] == {
         "response_id": "offline-response",
         "created": 1_787_777_777,
-        "served_model": "zbook-local/exact-model-id",
+        "served_model": "lab/exact-model-id",
         "finish_reason": "stop",
         "system_fingerprint": None,
         "usage": {
@@ -1495,378 +1478,6 @@ def test_configured_no_fallback_raises_with_complete_failed_run_record():
     assert caught.value.evidence_pack.used_bytes <= config.evidence_budget_bytes
 
 
-def test_endpoint_policy_is_loopback_only_by_default_and_remote_is_explicit():
-    with pytest.raises(SynthesisInputError, match="localhost-only"):
-        SynthesisConfig(model="model", endpoint="http://example.com")
-    with pytest.raises(SynthesisInputError, match="localhost-only"):
-        SynthesisConfig(model="model", endpoint="http://127.0.0.1.evil.test")
-    with pytest.raises(SynthesisInputError, match="path must"):
-        SynthesisConfig(model="model", endpoint="http://127.0.0.1:1234/admin")
-
-    explicit = SynthesisConfig(
-        model="model",
-        endpoint="https://example.com/v1",
-        endpoint_policy=EndpointPolicy(
-            localhost_only=False,
-            allowed_schemes=("https",),
-            strict_zbook_local=False,
-        ),
-    )
-    assert explicit.endpoint_policy.localhost_only is False
-
-    with pytest.raises(SynthesisInputError, match="timeout"):
-        SynthesisConfig(model="model", timeout_seconds=True)
-    with pytest.raises(SynthesisInputError, match="temperature"):
-        SynthesisConfig(model="model", temperature=True)
-    with pytest.raises(SynthesisInputError, match="reasoning_effort"):
-        SynthesisConfig(model="model", reasoning_effort="low")
-    with pytest.raises(SynthesisInputError, match="strict LM Studio"):
-        SynthesisConfig(
-            model="model",
-            reasoning_effort="none",
-            endpoint_policy=EndpointPolicy(strict_zbook_local=False),
-        )
-    with pytest.raises(SynthesisInputError, match="product_detail"):
-        SynthesisConfig(model="model", product_detail="verbose")
-    with pytest.raises(SynthesisInputError, match="include_findings"):
-        SynthesisConfig(model="model", include_findings="no")
-
-
-def _http_response(payload: bytes, *, status: str = "200 OK") -> bytes:
-    return (
-        f"HTTP/1.1 {status}\r\n"
-        "Content-Type: application/json; charset=utf-8\r\n"
-        f"Content-Length: {len(payload)}\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-    ).encode("ascii") + payload
-
-
-def _raw_http(headers: list[tuple[str, str]], body: bytes = b"") -> bytes:
-    lines = ["HTTP/1.1 200 OK", *(f"{name}: {value}" for name, value in headers)]
-    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + body
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.value = 100.0
-
-    def __call__(self) -> float:
-        return self.value
-
-
-class _FakeSocket:
-    def __init__(
-        self,
-        response: bytes,
-        *,
-        peer: str = "127.0.0.1",
-        clock: _FakeClock | None = None,
-        seconds_per_recv: float = 0.0,
-        recv_width: int | None = None,
-    ) -> None:
-        self.response = bytearray(response)
-        self.peer = peer
-        self.clock = clock
-        self.seconds_per_recv = seconds_per_recv
-        self.recv_width = recv_width
-        self.sent = bytearray()
-        self.timeouts: list[float] = []
-        self.connections: list[tuple[str, int]] = []
-        self.closed = False
-
-    def getpeername(self):
-        return (self.peer, 1234)
-
-    def settimeout(self, value: float) -> None:
-        self.timeouts.append(value)
-
-    def connect(self, address: tuple[str, int]) -> None:
-        self.connections.append(address)
-
-    def send(self, payload) -> int:
-        raw = bytes(payload)
-        self.sent.extend(raw)
-        return len(raw)
-
-    def recv(self, maximum: int) -> bytes:
-        if self.clock is not None:
-            self.clock.value += self.seconds_per_recv
-        if not self.response:
-            return b""
-        width = min(maximum, len(self.response))
-        if self.recv_width is not None:
-            width = min(width, self.recv_width)
-        value = bytes(self.response[:width])
-        del self.response[:width]
-        return value
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _SocketFactory:
-    def __init__(self, result: _FakeSocket | BaseException) -> None:
-        self.result = result
-        self.calls: list[tuple[tuple[str, int], float]] = []
-
-    def __call__(self, address: tuple[str, int], timeout: float):
-        self.calls.append((address, timeout))
-        if isinstance(self.result, BaseException):
-            raise self.result
-        return self.result
-
-
-def test_stdlib_client_posts_exact_bytes_with_timeout_without_live_network():
-    response = _api_response('{"claims":[]}')
-    sock = _FakeSocket(_http_response(response))
-    factory = _SocketFactory(sock)
-    client = OpenAICompatibleClient(_socket_factory=factory)
-    body = b'{"offline":true}'
-
-    returned = client.complete(
-        body,
-        timeout_seconds=2.25,
-        max_response_bytes=4_096,
-    )
-
-    assert returned == response
-    address, timeout = factory.calls[0]
-    assert address == ("127.0.0.1", 1234)
-    assert 0 < timeout <= 2.25
-    head, sent_body = bytes(sock.sent).split(b"\r\n\r\n", 1)
-    assert head.startswith(b"POST /v1/chat/completions HTTP/1.1\r\n")
-    assert b"Content-Type: application/json; charset=utf-8" in head
-    assert sent_body == body
-    assert client.last_peer_host == "127.0.0.1"
-    assert sock.closed is True
-
-
-def test_default_direct_client_never_enters_getaddrinfo_or_dns(monkeypatch):
-    response = _api_response('{"claims":[]}')
-    sock = _FakeSocket(_http_response(response))
-    socket_calls: list[tuple[int, int, int]] = []
-
-    def forbidden_getaddrinfo(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("getaddrinfo/DNS must not be reachable")
-
-    def fake_socket(family: int, kind: int, protocol: int):
-        socket_calls.append((family, kind, protocol))
-        return sock
-
-    monkeypatch.setattr(
-        "autotldr.synthesis.socket.getaddrinfo", forbidden_getaddrinfo
-    )
-    monkeypatch.setattr("autotldr.synthesis.socket.socket", fake_socket)
-    client = OpenAICompatibleClient()
-
-    assert client.complete(
-        b"{}", timeout_seconds=1, max_response_bytes=16_000
-    ) == response
-    assert socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)]
-    assert sock.connections == [("127.0.0.1", 1234)]
-    assert client.attestation.implementation == "direct-loopback-http1-v1"
-    assert client.attestation.proxy_policy == "no-proxy-code-path"
-    assert client.attestation.deadline_policy == (
-        "absolute-monotonic-per-operation-v1"
-    )
-
-
-def test_stdlib_client_classifies_timeout_and_bounds_response_offline():
-    timed_out = OpenAICompatibleClient(
-        _socket_factory=_SocketFactory(socket.timeout("offline timeout"))
-    )
-    with pytest.raises(SynthesisTimeoutError, match="timed out"):
-        timed_out.complete(b"{}", timeout_seconds=1, max_response_bytes=20)
-
-    sock = _FakeSocket(_http_response(b"x" * 30))
-    too_large = OpenAICompatibleClient(_socket_factory=_SocketFactory(sock))
-    with pytest.raises(SynthesisClientError, match="byte limit"):
-        too_large.complete(b"{}", timeout_seconds=1, max_response_bytes=20)
-
-
-@pytest.mark.parametrize("proxy_name", ["http_proxy", "HTTP_PROXY", "ALL_PROXY"])
-def test_direct_client_has_no_proxy_or_redirect_code_path(monkeypatch, proxy_name):
-    monkeypatch.setenv(proxy_name, "http://192.0.2.1:8888")
-    sock = _FakeSocket(_http_response(b"{}"))
-    client = OpenAICompatibleClient(_socket_factory=_SocketFactory(sock))
-
-    assert client.complete(b"{}", timeout_seconds=1, max_response_bytes=20) == b"{}"
-    assert client.attestation.implementation == "offline-injected-socket-test-v1"
-    assert client.attestation.proxy_policy == "injected-factory-not-production"
-    assert client.attestation.redirect_policy == "reject-non-200-no-follow"
-
-    redirected = _FakeSocket(_http_response(b"{}", status="302 Found"))
-    with pytest.raises(SynthesisClientError, match="exact HTTP/1.1 status 200"):
-        OpenAICompatibleClient(
-            _socket_factory=_SocketFactory(redirected)
-        ).complete(b"{}", timeout_seconds=1, max_response_bytes=20)
-
-
-def test_direct_client_rejects_non_loopback_peer_and_enforces_absolute_deadline():
-    wrong_peer = _FakeSocket(_http_response(b"{}"), peer="192.0.2.4")
-    with pytest.raises(SynthesisClientError, match="exact numeric loopback"):
-        OpenAICompatibleClient(
-            _socket_factory=_SocketFactory(wrong_peer)
-        ).complete(b"{}", timeout_seconds=1, max_response_bytes=20)
-
-    clock = _FakeClock()
-    trickle = _FakeSocket(
-        _http_response(b"{}"),
-        clock=clock,
-        seconds_per_recv=0.006,
-        recv_width=1,
-    )
-    with pytest.raises(SynthesisTimeoutError):
-        OpenAICompatibleClient(
-            _socket_factory=_SocketFactory(trickle), _clock=clock
-        ).complete(b"{}", timeout_seconds=0.01, max_response_bytes=20)
-    assert trickle.closed is True
-
-
-def test_direct_client_accepts_exact_chunked_framing_without_trailers():
-    payload = _api_response('{"claims":[]}')
-    midpoint = len(payload) // 2
-    body = (
-        f"{midpoint:x}\r\n".encode("ascii")
-        + payload[:midpoint]
-        + b"\r\n"
-        + f"{len(payload) - midpoint:x}\r\n".encode("ascii")
-        + payload[midpoint:]
-        + b"\r\n0\r\n\r\n"
-    )
-    raw = _raw_http(
-        [
-            ("Content-Type", "application/json; charset=utf-8"),
-            ("Transfer-Encoding", "chunked"),
-        ],
-        body,
-    )
-    client = OpenAICompatibleClient(
-        _socket_factory=_SocketFactory(_FakeSocket(raw))
-    )
-
-    assert client.complete(
-        b"{}", timeout_seconds=1, max_response_bytes=16_000
-    ) == payload
-
-
-@pytest.mark.parametrize(
-    "raw,error_code",
-    [
-        (
-            _raw_http(
-                [
-                    ("Content-Type", "application/json"),
-                    ("Content-Length", "2"),
-                    ("Transfer-Encoding", "chunked"),
-                ],
-                b"{}",
-            ),
-            "http-framing-conflict",
-        ),
-        (
-            _raw_http([("Content-Type", "application/json")]),
-            "http-framing-missing",
-        ),
-        (
-            _raw_http(
-                [
-                    ("Content-Type", "application/json"),
-                    ("Content-Length", "9" * 5_000),
-                ]
-            ),
-            "http-content-length",
-        ),
-        (
-            _raw_http(
-                [
-                    ("Content-Type", "application/json"),
-                    ("Content-Length", "2"),
-                    ("Content-Length", "2"),
-                ],
-                b"{}",
-            ),
-            "http-header-duplicate",
-        ),
-        (
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-            b" folded: no\r\nContent-Length: 2\r\n\r\n{}",
-            "http-header-obs-fold",
-        ),
-        (
-            _raw_http(
-                [
-                    ("Content-Type", "application/json"),
-                    ("Content-Encoding", "gzip"),
-                    ("Content-Length", "2"),
-                ],
-                b"{}",
-            ),
-            "http-content-encoding",
-        ),
-        (
-            _raw_http(
-                [
-                    ("Content-Type", "application/json"),
-                    ("Trailer", "Digest"),
-                    ("Transfer-Encoding", "chunked"),
-                ],
-                b"0\r\n\r\n",
-            ),
-            "http-unsupported-framing",
-        ),
-        (
-            _raw_http(
-                [
-                    ("Content-Type", "application/json"),
-                    ("Transfer-Encoding", "chunked"),
-                ],
-                b"2;extension=x\r\n{}\r\n0\r\n\r\n",
-            ),
-            "http-chunk-size",
-        ),
-        (
-            _raw_http(
-                [
-                    ("Content-Type", "application/json"),
-                    ("Transfer-Encoding", "chunked"),
-                ],
-                b"2\r\n{}\r\n0\r\nDigest: x\r\n\r\n",
-            ),
-            "http-chunk-trailer",
-        ),
-        (
-            _raw_http(
-                [
-                    ("Content-Type", "application/json"),
-                    ("Content-Length", "2"),
-                ],
-                b"{}smuggled",
-            ),
-            "http-body-overrun",
-        ),
-        (
-            _raw_http(
-                [("Content-Type", "text/plain"), ("Content-Length", "2")],
-                b"{}",
-            ),
-            "http-content-type",
-        ),
-    ],
-)
-def test_direct_client_rejects_ambiguous_or_extended_http_framing(raw, error_code):
-    client = OpenAICompatibleClient(
-        _socket_factory=_SocketFactory(_FakeSocket(raw))
-    )
-
-    with pytest.raises(SynthesisClientError) as caught:
-        client.complete(b"{}", timeout_seconds=1, max_response_bytes=16_000)
-
-    assert caught.value.code == error_code
-
-
 def test_http_envelope_extraction_is_strict_and_does_not_search_for_json():
     valid = _api_response('{"claims":[]}')
     parsed = extract_response_content(valid, config=_config())
@@ -1902,7 +1513,7 @@ def test_http_envelope_rejects_every_non_stop_finish_reason(finish_reason):
 def test_http_envelope_rejects_missing_mismatched_model_and_unfrozen_alias():
     missing = json.loads(_api_response('{"claims":[]}'))
     del missing["model"]
-    with pytest.raises(SynthesisValidationError, match="strict envelope"):
+    with pytest.raises(SynthesisValidationError, match="does not name the served model"):
         extract_response_content(json.dumps(missing).encode(), config=_config())
 
     with pytest.raises(SynthesisValidationError, match="served model identity"):
@@ -1918,7 +1529,7 @@ def test_http_envelope_rejects_missing_mismatched_model_and_unfrozen_alias():
     assert accepted.served_model == "frozen/server-alias"
 
 
-def test_exact_lm_studio_compatibility_profile_is_hash_bound_not_authoritative():
+def test_gateway_and_router_extras_are_ignored_and_reasoning_is_hashed_only():
     reasoning = "Internal reasoning that must never become a grounded claim."
     payload = json.loads(
         _api_response(
@@ -1926,248 +1537,64 @@ def test_exact_lm_studio_compatibility_profile_is_hash_bound_not_authoritative()
             message_extra={
                 "reasoning_content": reasoning,
                 "tool_calls": [],
+                "refusal": None,
+                "provider_specific_fields": {"refusal": None},
             },
             envelope_extra={
-                "stats": {
-                    "accepted_draft_tokens_count": 55,
-                    "rejected_draft_tokens_count": 5,
-                    "total_draft_tokens_count": 60,
-                }
+                "stats": {"accepted_draft_tokens_count": 55},
+                "timings": {"prompt_n": 10, "predicted_ms": 12.5},
+                "system_fingerprint": "b1-c841aee",
+            },
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 999,
+                "prompt_tokens_details": {"cached_tokens": 8},
+                "completion_tokens_details": {"reasoning_tokens": 17, "other": 1},
             },
         )
     )
     payload["choices"][0]["logprobs"] = None
-
-    parsed = extract_response_content(
-        json.dumps(payload).encode(),
-        config=_config(),
-    )
-
-    assert parsed.content == '{"claims":[]}'
-    assert reasoning not in json.dumps(parsed.record(), sort_keys=True)
-    assert parsed.record()["provider_compatibility"] == {
-        "profile": "lm-studio-chat-completion-extras-v1",
-        "reasoning_content": {
-            "authority": "discarded-not-claim-input",
-            "bytes": len(reasoning.encode()),
-            "sha256": hashlib.sha256(reasoning.encode()).hexdigest(),
-        },
-        "speculative_decoding": {
-            "accepted_draft_tokens_count": 55,
-            "rejected_draft_tokens_count": 5,
-            "total_draft_tokens_count": 60,
-        },
-        "tool_calls": "present-empty",
-    }
-
-
-def test_empty_lm_studio_stats_is_accepted_and_a_partial_set_is_not():
-    """A model loaded without a draft model reports `"stats": {}`.
-
-    Observed against LM Studio on 2026-08-31 with granite-4.2-8b. Refusing it
-    locked out every non-speculative model on the endpoint the product targets.
-    """
-
-    reasoning = "hidden"
-    payload = json.loads(
-        _api_response(
-            '{"claims":[]}',
-            message_extra={"reasoning_content": reasoning, "tool_calls": []},
-            envelope_extra={"stats": {}},
-        )
-    )
-    payload["choices"][0]["logprobs"] = None
+    payload["choices"][0]["provider_specific_fields"] = {}
 
     parsed = extract_response_content(json.dumps(payload).encode(), config=_config())
 
-    assert parsed.record()["provider_compatibility"]["speculative_decoding"] == {}
-    assert parsed.record()["provider_compatibility"]["profile"] == (
-        "lm-studio-chat-completion-extras-v1"
-    )
-
-    partial = json.loads(
-        _api_response(
-            '{"claims":[]}',
-            message_extra={"reasoning_content": reasoning, "tool_calls": []},
-            envelope_extra={"stats": {"accepted_draft_tokens_count": 1}},
-        )
-    )
-    partial["choices"][0]["logprobs"] = None
-    with pytest.raises(SynthesisValidationError, match="qualified profile"):
-        extract_response_content(json.dumps(partial).encode(), config=_config())
-
-    unknown = json.loads(
-        _api_response(
-            '{"claims":[]}',
-            message_extra={"reasoning_content": reasoning, "tool_calls": []},
-            envelope_extra={"stats": {"something_new": 1}},
-        )
-    )
-    unknown["choices"][0]["logprobs"] = None
-    with pytest.raises(SynthesisValidationError, match="qualified profile"):
-        extract_response_content(json.dumps(unknown).encode(), config=_config())
-
-
-def test_exact_reasoning_token_usage_detail_is_retained_and_bounded():
-    parsed = extract_response_content(
-        _api_response(
-            '{"claims":[]}',
-            usage={
-                "prompt_tokens": 100,
-                "completion_tokens": 20,
-                "total_tokens": 120,
-                "completion_tokens_details": {"reasoning_tokens": 17},
-            },
-        ),
-        config=_config(),
-    )
-
+    assert parsed.content == '{"claims":[]}'
+    assert parsed.system_fingerprint == "b1-c841aee"
     assert parsed.reasoning_tokens == 17
-    assert parsed.record()["usage"]["completion_tokens_details"] == {
-        "reasoning_tokens": 17
+    record = parsed.record()
+    assert reasoning not in json.dumps(record, sort_keys=True)
+    assert record["reasoning"] == {
+        "authority": "discarded-not-claim-input",
+        "field": "reasoning_content",
+        "bytes": len(reasoning.encode()),
+        "sha256": hashlib.sha256(reasoning.encode()).hexdigest(),
     }
 
-    for details in (
-        {"reasoning_tokens": 21},
-        {"reasoning_tokens": 1, "invented": 1},
-    ):
-        with pytest.raises(SynthesisValidationError, match="reasoning|details"):
-            extract_response_content(
-                _api_response(
-                    '{"claims":[]}',
-                    usage={
-                        "prompt_tokens": 100,
-                        "completion_tokens": 20,
-                        "total_tokens": 120,
-                        "completion_tokens_details": details,
-                    },
-                ),
-                config=_config(),
-            )
 
-
-def test_qualified_no_reasoning_request_is_emitted_and_verified():
-    _extraction, pack = _full_pack()
-    config = _config(reasoning_effort="none")
-    request = json.loads(build_chat_request(pack, config))
-
-    assert request["reasoning_effort"] == "none"
-
-    accepted = _api_response(
-        '{"claims":[]}',
-        message_extra={"reasoning_content": "", "tool_calls": []},
-        envelope_extra={"stats": {}},
-        usage={
-            "prompt_tokens": 100,
-            "completion_tokens": 20,
-            "total_tokens": 120,
-            "completion_tokens_details": {"reasoning_tokens": 0},
-        },
-    )
-    parsed = extract_response_content(accepted, config=config)
-    assert parsed.reasoning_tokens == 0
-
-    for reasoning, reasoning_tokens in (("hidden", 0), ("", 1)):
-        rejected = _api_response(
-            '{"claims":[]}',
-            message_extra={"reasoning_content": reasoning, "tool_calls": []},
-            envelope_extra={"stats": {}},
-            usage={
-                "prompt_tokens": 100,
-                "completion_tokens": 20,
-                "total_tokens": 120,
-                "completion_tokens_details": {
-                    "reasoning_tokens": reasoning_tokens
-                },
-            },
-        )
-        with pytest.raises(SynthesisValidationError, match="did not honor"):
-            extract_response_content(rejected, config=config)
-
-
-def test_lm_studio_extras_survive_only_as_bounded_model_run_audit():
-    extraction, pack = _full_pack()
-    claim = _claim("One grounded result.", [pack.unit_ids[0]])
-    reasoning = "PRIVATE NON-AUTHORITATIVE REASONING"
-    raw = _api_response(
-        claim,
-        message_extra={"reasoning_content": reasoning, "tool_calls": []},
-        envelope_extra={
-            "stats": {
-                "accepted_draft_tokens_count": 8,
-                "rejected_draft_tokens_count": 2,
-                "total_draft_tokens_count": 10,
-            }
-        },
-        usage={
-            "prompt_tokens": 100,
-            "completion_tokens": 20,
-            "total_tokens": 120,
-            "completion_tokens_details": {"reasoning_tokens": 12},
-        },
-    )
-    payload = json.loads(raw)
-    payload["choices"][0]["logprobs"] = None
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-
-    result = synthesize(extraction, _config(), client=_StaticClient(raw))
-
-    assert result.used_fallback is False
-    assert result.model_run["outcome"] == "success"
-    compatibility = result.model_run["response_facts"]["provider_compatibility"]
-    assert compatibility["profile"] == "lm-studio-chat-completion-extras-v1"
-    assert compatibility["reasoning_content"]["sha256"] == hashlib.sha256(
-        reasoning.encode()
-    ).hexdigest()
-    assert compatibility["reasoning_content"]["bytes"] == len(reasoning.encode())
-    assert compatibility["usage_detail"] == "reasoning-tokens-v1"
-    assert reasoning not in json.dumps(result.model_run, sort_keys=True)
-    assert all(reasoning not in item.content for item in result.extraction.summary_claims)
-
-
-@pytest.mark.parametrize(
-    "mutation,error_code",
-    [
-        (lambda value: value["stats"].__setitem__("unknown", 1), "fields"),
-        (
-            lambda value: value["stats"].__setitem__(
-                "total_draft_tokens_count", 61
-            ),
-            "total",
-        ),
-        (
-            lambda value: value["choices"][0]["message"].__setitem__(
-                "tool_calls", [{"type": "function"}]
-            ),
-            "tool_calls",
-        ),
-        (
-            lambda value: value["choices"][0]["message"].pop(
-                "reasoning_content"
-            ),
-            "incomplete",
-        ),
-    ],
-)
-def test_lm_studio_compatibility_profile_fails_closed(mutation, error_code):
-    payload = json.loads(
-        _api_response(
-            '{"claims":[]}',
-            message_extra={"reasoning_content": "bounded", "tool_calls": []},
-            envelope_extra={
-                "stats": {
-                    "accepted_draft_tokens_count": 2,
-                    "rejected_draft_tokens_count": 1,
-                    "total_draft_tokens_count": 3,
+def test_minimal_response_without_id_usage_or_created_is_accepted():
+    minimal = json.dumps(
+        {
+            "model": "lab/exact-model-id",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": '{"claims":[]}'},
                 }
-            },
-        )
-    )
-    payload["choices"][0]["logprobs"] = None
-    mutation(payload)
+            ],
+        }
+    ).encode()
 
-    with pytest.raises(SynthesisValidationError, match=error_code):
-        extract_response_content(json.dumps(payload).encode(), config=_config())
+    parsed = extract_response_content(minimal, config=_config())
+
+    assert parsed.record() == {
+        "response_id": None,
+        "created": None,
+        "served_model": "lab/exact-model-id",
+        "finish_reason": "stop",
+        "system_fingerprint": None,
+        "usage": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -2175,25 +1602,128 @@ def test_lm_studio_compatibility_profile_fails_closed(mutation, error_code):
     [
         ({"message_role": "tool"}, "role must be assistant"),
         ({"message_extra": {"refusal": "no"}}, "refusal is not accepted"),
-        ({"message_extra": {"tool_calls": []}}, "tool_calls is not accepted"),
-        ({"message_extra": {"function_call": {}}}, "function_call is not accepted"),
         (
-            {
-                "usage": {
-                    "prompt_tokens": 100,
-                    "completion_tokens": 20,
-                    "total_tokens": 999,
-                }
-            },
-            "total must equal",
+            {"message_extra": {"tool_calls": [{"type": "function"}]}},
+            "tool_calls is not accepted",
         ),
+        ({"message_extra": {"function_call": {"name": "x"}}}, "function_call is not accepted"),
     ],
 )
-def test_http_envelope_rejects_non_assistant_authority_and_bad_usage(kwargs, error):
+def test_http_envelope_rejects_non_assistant_authority(kwargs, error):
     with pytest.raises(SynthesisValidationError, match=error):
         extract_response_content(
             _api_response('{"claims":[]}', **kwargs), config=_config()
         )
+
+
+@pytest.mark.parametrize(
+    "endpoint,expected",
+    [
+        ("http://127.0.0.1:1234", "http://127.0.0.1:1234/v1/chat/completions"),
+        ("https://gateway.lab:4000/v1", "https://gateway.lab:4000/v1/chat/completions"),
+        ("http://192.168.86.20:8080/api/v1/", "http://192.168.86.20:8080/api/v1/chat/completions"),
+    ],
+)
+def test_any_openai_compatible_endpoint_is_accepted(endpoint, expected):
+    assert OpenAICompatibleClient(endpoint).endpoint_url == expected
+    SynthesisConfig(model="model", endpoint=endpoint, reasoning_effort="none")
+
+
+def test_config_rejects_unusable_endpoints_keys_and_settings():
+    for endpoint in ("ftp://gateway/v1", "http://user:pw@gateway/v1", "http://gateway/v1?k=1"):
+        with pytest.raises(SynthesisInputError, match="invalid synthesis endpoint"):
+            SynthesisConfig(model="model", endpoint=endpoint)
+    with pytest.raises(SynthesisInputError, match="API key"):
+        SynthesisConfig(model="model", api_key="has space")
+    assert "sk-secret" not in repr(SynthesisConfig(model="model", api_key="sk-secret"))
+    with pytest.raises(SynthesisInputError, match="timeout"):
+        SynthesisConfig(model="model", timeout_seconds=True)
+    with pytest.raises(SynthesisInputError, match="temperature"):
+        SynthesisConfig(model="model", temperature=True)
+    with pytest.raises(SynthesisInputError, match="reasoning_effort"):
+        SynthesisConfig(model="model", reasoning_effort="low")
+    with pytest.raises(SynthesisInputError, match="product_detail"):
+        SynthesisConfig(model="model", product_detail="verbose")
+    with pytest.raises(SynthesisInputError, match="include_findings"):
+        SynthesisConfig(model="model", include_findings="no")
+
+
+def _serve_once(status: int, body: bytes, *, delay: float = 0.0):
+    import threading
+    import time as time_module
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen: list[tuple[str, str | None, bytes]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = self.rfile.read(int(self.headers["Content-Length"]))
+            seen.append((self.path, self.headers.get("Authorization"), request))
+            time_module.sleep(delay)
+            self.send_response(status)
+            if status in {301, 302, 307}:
+                self.send_header("Location", "http://127.0.0.1:9/v1/chat/completions")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, seen
+
+
+def test_http_client_posts_exact_bytes_with_bearer_auth_and_classifies_failures(monkeypatch):
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    cases = [
+        (200, b'{"ok":true}', 0.0, None),
+        (302, b"", 0.0, "http-status"),
+        (401, b'{"error":{"message":"bad key"}}', 0.0, "http-status"),
+        (200, b"x" * 2048, 0.0, "response-too-large"),
+        (200, b"{}", 1.5, "timeout"),
+    ]
+    for status, body, delay, error_code in cases:
+        server, thread, seen = _serve_once(status, body, delay=delay)
+        try:
+            client = OpenAICompatibleClient(
+                f"http://127.0.0.1:{server.server_port}", api_key="sk-lab"
+            )
+            if error_code is None:
+                assert client.complete(b'{"x":1}', timeout_seconds=5, max_response_bytes=1024) == body
+                assert seen == [("/v1/chat/completions", "Bearer sk-lab", b'{"x":1}')]
+            else:
+                expected = SynthesisTimeoutError if error_code == "timeout" else SynthesisClientError
+                with pytest.raises(expected) as caught:
+                    client.complete(b"{}", timeout_seconds=0.5, max_response_bytes=1024)
+                assert caught.value.code == error_code
+                if status == 401:
+                    assert "bad key" in str(caught.value)
+                assert len(seen) == 1
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+
+def test_injected_client_is_recorded_as_injected_without_attestation():
+    extraction, pack = _full_pack()
+
+    class BareClient:
+        def complete(self, request_body, *, timeout_seconds, max_response_bytes):
+            return _api_response(_claim("One grounded result.", [pack.unit_ids[0]]))
+
+    result = synthesize(extraction, _config(api_key="sk-never-recorded"), client=BareClient())
+
+    assert result.used_fallback is False
+    assert result.model_run["transport"] == {
+        "implementation": "injected-client",
+        "authorization": "bearer",
+    }
+    assert "sk-never-recorded" not in json.dumps(result.model_run)
 
 
 def test_chat_request_uses_exact_model_and_closed_schema():
@@ -2431,54 +1961,11 @@ def test_role_backend_capability_matrix_is_enforced(backend, role, accepted):
             build_evidence_pack(extraction, budget_bytes=8_000)
 
 
-def test_injected_client_requires_matching_immutable_transport_attestation():
-    class BareClient:
-        called = False
-
-        def complete(self, request_body, *, timeout_seconds, max_response_bytes):
-            self.called = True
-            return b"{}"
-
-    bare = BareClient()
-    with pytest.raises(SynthesisInputError, match="transport attestation"):
-        synthesize(_collection(), _config(), client=bare)
-    assert bare.called is False
-
-    mismatched = _StaticClient(b"{}")
-    mismatched.attestation = replace(
-        mismatched.attestation,
-        endpoint_url="http://127.0.0.1:1234/v1/other",
-    )
-    with pytest.raises(SynthesisInputError, match="differs from configuration"):
-        synthesize(_collection(), _config(), client=mismatched)
-    assert mismatched.requests == []
-
-
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        "http://localhost:1234",
-        "http://127.0.0.1:01234",
-        "http://127.0.0.1",
-        "https://127.0.0.1:1234",
-        "http://127.0.0.2:1234",
-    ],
-)
-def test_strict_zbook_policy_rejects_endpoint_aliases(endpoint):
-    with pytest.raises(
-        SynthesisInputError,
-        match="strict ZBook-local|outside the explicit policy",
-    ):
-        SynthesisConfig(model="model", endpoint=endpoint)
-
-
 def test_snapshot_is_frozen_before_an_injected_client_can_mutate_input():
     extraction = _collection()
     injected_content = "CLIENT-INJECTED-CLAIM-MUST-NOT-SURVIVE"
 
     class MutatingClient:
-        attestation = offline_test_transport_attestation()
-
         def complete(self, request_body, *, timeout_seconds, max_response_bytes):
             del request_body, timeout_seconds, max_response_bytes
             unit = extraction.units[0]
@@ -2660,20 +2147,20 @@ def test_rejected_response_authority_is_hash_recorded_but_not_accepted(
 
 def test_frozen_served_model_alias_is_explicitly_recorded():
     extraction, pack = _full_pack()
-    config = _config(allowed_response_model_aliases=("lmstudio/frozen-alias",))
+    config = _config(allowed_response_model_aliases=("gateway/frozen-alias",))
     response = _api_response(
         _claim("One grounded result.", [pack.unit_ids[0]]),
-        model="lmstudio/frozen-alias",
+        model="gateway/frozen-alias",
     )
 
     result = synthesize(extraction, config, client=_StaticClient(response))
 
     assert result.used_fallback is False
     assert result.model_run["settings"]["allowed_response_model_aliases"] == [
-        "lmstudio/frozen-alias"
+        "gateway/frozen-alias"
     ]
     assert result.model_run["response_facts"]["served_model"] == (
-        "lmstudio/frozen-alias"
+        "gateway/frozen-alias"
     )
 
 

@@ -9,9 +9,10 @@ or a URL and it returns what the thing *means*, rendered into the shape the
 caller asked for. `autotldr model.xlsx` returns the formula dependency graph, not
 a grid of numbers.
 
-Pre-alpha. The thin Stage 1–8 MVP is complete. The same public pipeline now
+Preparing v0.2.0, pending owner testing and approval. The thin
+Stage 1–8 MVP is complete. The same public pipeline now
 acquires a file/folder/archive/URL, fuses its addressable representation,
-optionally accepts strictly grounded local-model claims, and renders ANSI,
+optionally accepts strictly grounded model claims, and renders ANSI,
 Markdown, HTML, PDF, JSON, or JSONL. Watch and agent surfaces wrap that pipeline;
 they do not reimplement it.
 
@@ -80,11 +81,14 @@ good the output looks.
   AutoTLDR derives origins and rejects unknown IDs, model substitutions, invalid
   envelopes, and unsupported provider fields. The exact Stage 4 claims remain
   the model-off/failure source of truth.
-- **Local model work is ZBook-only.** Evaluation uses
-  `http://127.0.0.1:1234`, one AutoTLDR-owned generation model at a time, 100%
-  GPU offload, and sequential estimate/load/run/unload. Never load, invoke, or
-  unload a Dynamo/LM Link row. An embedding resident remains disabled until its
-  value is separately measured.
+- **The core is local; inference is borrowed.** Product prose calls one configured
+  OpenAI-compatible server (`base_url`, model `name`, optional `api_key_env`), local or on
+  the homelab (D-056). Ordinary commands never load, unload, or choose models.
+- **Frozen model evaluation stays ZBook-only.** The historical role benchmark uses
+  `http://127.0.0.1:1234`, one AutoTLDR-owned generation model at a time, 100% GPU
+  offload, and sequential estimate/load/run/unload. Never load, invoke, or unload a
+  Dynamo/LM Link row from that tooling. The Stage 5 synthesis benchmark's live run is
+  archived (D-056).
 - Local imports use relative paths within the package. Tests use `pytest`.
 
 ## Commands

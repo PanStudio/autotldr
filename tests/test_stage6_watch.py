@@ -111,6 +111,123 @@ def test_one_bad_file_does_not_stall_a_good_sibling(tmp_path: Path) -> None:
     assert "UnsupportedFormat" in (by_path["bad.png"].error or "")
     assert snapshot.last_run is not None
     assert snapshot.last_run.status == "partial"
+    rollup = (source / ".autotldr" / ROLLUP_NAME).read_text("utf-8")
+    assert "bad.png" in rollup
+    assert "UnsupportedFormat" in rollup
+
+
+def test_unchanged_failure_is_retried_and_still_fails_cli(tmp_path: Path, capsys) -> None:
+    (tmp_path / "bad.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    command = ["watch", str(tmp_path), "--once", "--model", "off", "--no-config"]
+    assert main(command) == 1
+    capsys.readouterr()
+    assert main(command) == 1
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["failed"] == 1
+    assert payload["unchanged"] == 0
+
+
+def test_watch_recovers_from_transient_failure_without_source_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autotldr import api
+
+    _write_markdown(tmp_path / "notes.md", "Notes", "An unchanged source.")
+    original = api.apply_product_synthesis
+
+    def unavailable(*args, **kwargs):
+        raise ValueError("temporary synthesis failure")
+
+    monkeypatch.setattr(api, "apply_product_synthesis", unavailable)
+    assert run_once(tmp_path).failed
+    monkeypatch.setattr(api, "apply_product_synthesis", original)
+    recovered = run_once(tmp_path)
+    assert recovered.succeeded == 1
+    assert recovered.failed == 0
+    assert recovered.rollup_written
+    assert status(tmp_path).files[0].status == "ok"
+
+
+def test_watch_rebuilds_for_changed_detail_and_budget(tmp_path: Path) -> None:
+    _write_markdown(tmp_path / "notes.md", "Notes", "Stable source content.")
+    run_once(tmp_path, detail="brief", budget=_GENEROUS_BUDGET)
+    deeper = run_once(tmp_path, detail="deep", budget=_GENEROUS_BUDGET)
+    assert deeper.changed == deeper.succeeded == 1
+    assert deeper.rollup_written
+    assert run_once(tmp_path, detail="deep", budget=_GENEROUS_BUDGET).unchanged == 1
+
+    too_small = run_once(tmp_path, detail="deep", budget=1)
+    assert too_small.failed == 2  # file and roll-up each have an exact ceiling
+    assert not too_small.rollup_written
+
+
+def test_watch_regenerates_a_deleted_artifact(tmp_path: Path) -> None:
+    _write_markdown(tmp_path / "notes.md", "Notes", "Stable source content.")
+    run_once(tmp_path)
+    target = artifact_path(tmp_path, "notes.md")
+    target.unlink()
+    repaired = run_once(tmp_path)
+    assert repaired.changed == repaired.succeeded == 1
+    assert target.is_file()
+
+
+def test_watch_retries_failed_rollup_when_files_are_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autotldr import api
+
+    _write_markdown(tmp_path / "notes.md", "Notes", "First source version.")
+    run_once(tmp_path)
+    original = api.apply_product_synthesis
+
+    def fail_collection(extraction, **kwargs):
+        if extraction.kind == "collection":
+            raise ValueError("temporary roll-up failure")
+        return original(extraction, **kwargs)
+
+    _write_markdown(tmp_path / "notes.md", "Notes", "Second source version.")
+    monkeypatch.setattr(api, "apply_product_synthesis", fail_collection)
+    failed = run_once(tmp_path)
+    assert failed.succeeded == failed.failed == 1
+    assert not failed.rollup_written
+    monkeypatch.setattr(api, "apply_product_synthesis", original)
+    repaired = run_once(tmp_path)
+    assert repaired.unchanged == 1
+    assert repaired.rollup_written
+    assert "Second source version." in (tmp_path / ".autotldr" / ROLLUP_NAME).read_text()
+
+
+def test_watch_does_not_cache_a_different_acquired_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autotldr import api
+
+    document = tmp_path / "notes.md"
+    _write_markdown(document, "Notes", "Before the acquisition race.")
+    original = api.acquire
+
+    def changed_before_acquire(*args, **kwargs):
+        _write_markdown(document, "Notes", "After the acquisition race.")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(api, "acquire", changed_before_acquire)
+    failed = run_once(tmp_path)
+    assert failed.failed == 1
+    assert not artifact_path(tmp_path, "notes.md").exists()
+    assert "UnstableSourceError" in failed.errors[0].message
+    monkeypatch.setattr(api, "acquire", original)
+    assert run_once(tmp_path).succeeded == 1
+
+
+def test_watch_hashes_archive_container_instead_of_its_manifest(tmp_path: Path) -> None:
+    import zipfile
+
+    with zipfile.ZipFile(tmp_path / "notes.zip", "w") as archive:
+        archive.writestr("notes.md", "# Notes\n\nArchive source.\n")
+    first = run_once(tmp_path)
+    assert first.succeeded == 1
+    assert first.failed == 0
+    assert run_once(tmp_path).unchanged == 1
 
 
 def test_store_uses_wal_and_status_is_read_only(tmp_path: Path) -> None:

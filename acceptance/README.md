@@ -4,6 +4,9 @@ This directory makes the alpha product gate reproducible without touching the fr
 Stage 4/5 scores or the Borealis hero. It exercises the four jobs in
 `docs/product-alpha.md` against deliberately non-hero inputs.
 
+For v0.2.0, D-055 sets owner acceptance and exact-commit CI as the publication gates.
+The short walkthrough is [`docs/try-it.md`](../docs/try-it.md).
+
 Acceptance is not a benchmark and must not become a prompt-tuning set. A run may expose a
 defect; fix the general product contract, add an independent regression, and retain the
 failed report. Do not edit the corpus until the observed defect has been classified.
@@ -42,9 +45,8 @@ relationships, explicit gaps, and no raw Parquet/NetCDF arrays or SQLite rows.
 
 ## Live product run
 
-Use only an already-active, explicitly configured AutoTLDR-owned LM Studio generation
-model. This procedure does not authorize loading, unloading, downloading, or invoking a
-linked/Dynamo model.
+Configure one OpenAI-compatible server and exact model with `autotldr setup` (D-056),
+as shown in the walkthrough, and continue when `doctor` reports ready.
 
 ```bash
 uv run autotldr doctor
@@ -101,10 +103,10 @@ Session reports and generated binaries belong under `.agent/acceptance/` and rem
 gitignored. Durable product conclusions belong in `docs/decisions.md`; never commit a
 private user artifact or source content from an interview.
 
-## External-user gate
+## External-user follow-up
 
-Engineering acceptance authorizes invited observation, not public release. Give each
-participant the rendered private-alpha bundle guide and follow
+The five-user protocol remains research follow-up under D-055. Give each
+participant the rendered release bundle guide and follow
 `docs/first-user-validation.md`. Copy `session-template.json` for each of the exact five
 participants, store no source content in those records, and run
 `scripts/evaluate_alpha_sessions.py` once the cohort is complete. Do not relax a failed

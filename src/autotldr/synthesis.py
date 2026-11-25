@@ -6,21 +6,17 @@ units that were actually present in that pack.  AutoTLDR validates the closed
 schema, derives origins from the cited units, constructs
 :class:`~autotldr.unit.GroundedStatement` objects, and records the exact run.
 
-This module is stdlib-only.  Its default transport policy accepts only the
-OpenAI-compatible chat-completions wire on a loopback endpoint; protocol
-compatibility is not authorization to contact a hosted service.
+This module is stdlib-only.  It speaks the OpenAI-compatible chat-completions wire
+to whichever server the user configured, local or on another machine.
 """
 
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import math
 import re
-import socket
 import time
-import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -40,19 +36,13 @@ from .unit import (
 
 EVIDENCE_SCHEMA = "autotldr-synthesis-evidence-v1"
 RESPONSE_SCHEMA = "autotldr-synthesis-response-v1"
-MODEL_RUN_SCHEMA = "autotldr-model-run-v2"
+MODEL_RUN_SCHEMA = "autotldr-model-run-v3"
 SYNTHESIS_TASK = "collection-synthesis"
-DEFAULT_ENDPOINT = "http://127.0.0.1:1234"
+DEFAULT_ENDPOINT = "http://127.0.0.1:1234/v1"
 MAX_CLAIMS = 3
 MAX_CLAIM_BYTES = 320
 MAX_EVIDENCE_IDS_PER_CLAIM = 12
 MAX_EVIDENCE_UNITS = 48
-_ZBOOK_HOST = "127.0.0.1"
-_ZBOOK_PORT = 1234
-_MAX_HTTP_HEADER_BYTES = 64 * 1024
-_MAX_HTTP_HEADER_LINES = 128
-_MAX_HTTP_LINE_BYTES = 8 * 1024
-_HTTP_READ_CHUNK = 16 * 1024
 
 _STAGE4_IMPLEMENTATION_SHA256 = (
     "830d42e7efcdf3fd20beac11733acf9276c0484af810e439dd70122de8dc8420"
@@ -233,112 +223,13 @@ def _origin_record(origin: Origin) -> dict[str, Any]:
     }
 
 
-@dataclass(frozen=True, slots=True)
-class EndpointPolicy:
-    """Explicit endpoint boundary for synthesis transport.
+def _normalized_endpoint(endpoint: str) -> str:
+    from .transport import chat_completions_url
 
-    ``localhost_only=True`` is the production default.  Constructing a policy
-    with ``localhost_only=False`` is an explicit protocol-level opt-out, not an
-    authorization decision made by AutoTLDR.
-    """
-
-    localhost_only: bool = True
-    allowed_schemes: tuple[str, ...] = ("http",)
-    strict_zbook_local: bool = True
-
-    def __post_init__(self) -> None:
-        if type(self.allowed_schemes) is not tuple or not all(
-            type(item) is str for item in self.allowed_schemes
-        ):
-            raise SynthesisInputError("endpoint policy schemes must be a string tuple")
-        schemes = tuple(item.casefold() for item in self.allowed_schemes)
-        if not schemes or any(item not in {"http", "https"} for item in schemes):
-            raise SynthesisInputError(
-                "endpoint policy schemes must be a non-empty subset of http/https"
-            )
-        object.__setattr__(self, "allowed_schemes", schemes)
-        if not isinstance(self.localhost_only, bool):
-            raise SynthesisInputError("localhost_only must be a boolean")
-        if not isinstance(self.strict_zbook_local, bool):
-            raise SynthesisInputError("strict_zbook_local must be a boolean")
-        if self.strict_zbook_local:
-            if not self.localhost_only:
-                raise SynthesisInputError(
-                    "strict ZBook-local policy cannot disable localhost_only"
-                )
-            if schemes != ("http",):
-                raise SynthesisInputError(
-                    "strict ZBook-local policy requires only the http scheme"
-                )
-
-
-def _normalized_endpoint(
-    endpoint: str, policy: EndpointPolicy
-) -> tuple[str, str]:
-    if type(endpoint) is not str or not endpoint or endpoint.strip() != endpoint:
-        raise SynthesisInputError("endpoint must be a non-empty, unpadded URL")
     try:
-        endpoint.encode("utf-8", errors="strict")
-        parsed = urllib.parse.urlsplit(endpoint)
-        port = parsed.port
-    except (UnicodeEncodeError, ValueError) as exc:
+        return chat_completions_url(endpoint)
+    except ValueError as exc:
         raise SynthesisInputError(f"invalid synthesis endpoint: {exc}") from exc
-    scheme = parsed.scheme.casefold()
-    if scheme not in policy.allowed_schemes:
-        raise SynthesisInputError(
-            f"endpoint scheme {scheme!r} is outside the explicit policy"
-        )
-    if not parsed.netloc or parsed.hostname is None:
-        raise SynthesisInputError("endpoint must include a host")
-    if parsed.username is not None or parsed.password is not None:
-        raise SynthesisInputError("endpoint credentials are not allowed in the URL")
-    if parsed.query or parsed.fragment:
-        raise SynthesisInputError("endpoint query strings and fragments are not allowed")
-    if port is not None and not 1 <= port <= 65535:
-        raise SynthesisInputError("endpoint port is outside 1..65535")
-
-    host = parsed.hostname.casefold()
-    loopback = host == "localhost"
-    if not loopback:
-        try:
-            loopback = ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            loopback = False
-    if policy.localhost_only and not loopback:
-        raise SynthesisInputError(
-            "remote synthesis endpoint rejected by localhost-only policy"
-        )
-
-    if policy.strict_zbook_local and (
-        scheme != "http"
-        or host != _ZBOOK_HOST
-        or port != _ZBOOK_PORT
-        or parsed.netloc != f"{_ZBOOK_HOST}:{_ZBOOK_PORT}"
-    ):
-        raise SynthesisInputError(
-            "strict ZBook-local synthesis requires http://127.0.0.1:1234"
-        )
-
-    path = parsed.path.rstrip("/")
-    if path in {"", "/v1"}:
-        chat_path = "/v1/chat/completions"
-    elif path == "/v1/chat/completions":
-        chat_path = path
-    else:
-        raise SynthesisInputError(
-            "endpoint path must be empty, /v1, or /v1/chat/completions"
-        )
-    url = urllib.parse.urlunsplit(
-        (scheme, parsed.netloc, chat_path, "", "")
-    )
-    endpoint_class = (
-        "openai-compatible-zbook-local"
-        if policy.strict_zbook_local
-        else "openai-compatible-localhost"
-        if loopback
-        else "openai-compatible-remote-explicit"
-    )
-    return url, endpoint_class
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,7 +239,6 @@ class SynthesisConfig:
     model: str
     endpoint: str = DEFAULT_ENDPOINT
     allowed_response_model_aliases: tuple[str, ...] = ()
-    endpoint_policy: EndpointPolicy = field(default_factory=EndpointPolicy)
     evidence_budget_bytes: int = 12_000
     timeout_seconds: float = 30.0
     max_output_tokens: int = 256
@@ -360,11 +250,16 @@ class SynthesisConfig:
     product_detail: str | None = None
     include_findings: bool = True
     fallback_on_failure: bool = True
+    api_key: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if type(self.endpoint_policy) is not EndpointPolicy:
-            raise SynthesisInputError("endpoint_policy must be an EndpointPolicy")
-        EndpointPolicy.__post_init__(self.endpoint_policy)
+        if self.api_key is not None:
+            from .transport import validate_api_key
+
+            try:
+                validate_api_key(self.api_key)
+            except ValueError as exc:
+                raise SynthesisInputError(str(exc)) from exc
         if type(self.model) is not str or not self.model:
             raise SynthesisInputError("exact model ID must be a non-empty string")
         if self.model.strip() != self.model:
@@ -443,10 +338,6 @@ class SynthesisConfig:
                 raise SynthesisInputError(
                     "reasoning_effort must be None or the qualified value 'none'"
                 )
-            if not self.endpoint_policy.strict_zbook_local:
-                raise SynthesisInputError(
-                    "reasoning_effort is qualified only for the strict LM Studio path"
-                )
         if self.product_detail not in {None, "brief", "standard", "deep"}:
             raise SynthesisInputError(
                 "product_detail must be None, brief, standard, or deep"
@@ -455,7 +346,7 @@ class SynthesisConfig:
             raise SynthesisInputError("include_findings must be a boolean")
         if not isinstance(self.fallback_on_failure, bool):
             raise SynthesisInputError("fallback_on_failure must be a boolean")
-        _normalized_endpoint(self.endpoint, self.endpoint_policy)
+        _normalized_endpoint(self.endpoint)
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,7 +506,7 @@ class DroppedPriorClaim:
 
 
 def response_json_schema(*, max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
-    """Return the closed response schema sent to the local model."""
+    """Return the closed response schema sent to the model."""
 
     if type(max_claims) is not int or not 1 <= max_claims <= 15:
         raise SynthesisInputError("response max_claims must be in 1..15")
@@ -2294,8 +2185,6 @@ def build_chat_request(pack: EvidencePack, config: SynthesisConfig) -> bytes:
 
 
 class CompletionClient(Protocol):
-    attestation: TransportAttestation
-
     def complete(
         self,
         request_body: bytes,
@@ -2306,438 +2195,18 @@ class CompletionClient(Protocol):
         """Return the exact HTTP response body or raise a transport error."""
 
 
-@dataclass(frozen=True, slots=True)
-class TransportAttestation:
-    """Immutable declaration required from every completion transport.
-
-    A custom client is executable application code and therefore cannot be
-    sandboxed here. Requiring this exact value prevents the synthesis manifest
-    from silently claiming that an undeclared client used the guarded local
-    transport.
-    """
-
-    endpoint_url: str
-    endpoint_class: str
-    implementation: str
-    proxy_policy: str
-    redirect_policy: str
-    peer_requirement: str
-    deadline_policy: str
-
-    def __post_init__(self) -> None:
-        for label, value in self.record().items():
-            if (
-                not isinstance(value, str)
-                or not value
-                or value.strip() != value
-                or _has_disallowed_control(value)
-            ):
-                raise SynthesisInputError(
-                    f"transport attestation {label} must be printable and non-empty"
-                )
-
-    def record(self) -> dict[str, str]:
-        return {
-            "endpoint_url": self.endpoint_url,
-            "endpoint_class": self.endpoint_class,
-            "implementation": self.implementation,
-            "proxy_policy": self.proxy_policy,
-            "redirect_policy": self.redirect_policy,
-            "peer_requirement": self.peer_requirement,
-            "deadline_policy": self.deadline_policy,
-        }
-
-
-def offline_test_transport_attestation(
-    endpoint: str = DEFAULT_ENDPOINT,
-) -> TransportAttestation:
-    """Build an explicit attestation for an offline injected test client.
-
-    This helper does not make an injected client safe for production. Its
-    distinct implementation name remains in the model-run record so a frozen
-    evaluator can require the direct transport.
-    """
-
-    policy = EndpointPolicy()
-    endpoint_url, endpoint_class = _normalized_endpoint(endpoint, policy)
-    return TransportAttestation(
-        endpoint_url=endpoint_url,
-        endpoint_class=endpoint_class,
-        implementation="offline-injected-test-v1",
-        proxy_policy="caller-attested-disabled",
-        redirect_policy="caller-attested-disabled",
-        peer_requirement=_ZBOOK_HOST,
-        deadline_policy="caller-attested-absolute-monotonic",
-    )
-
-
-def _direct_transport_attestation(
-    endpoint_url: str, endpoint_class: str
-) -> TransportAttestation:
-    return TransportAttestation(
-        endpoint_url=endpoint_url,
-        endpoint_class=endpoint_class,
-        implementation="direct-loopback-http1-v1",
-        proxy_policy="no-proxy-code-path",
-        redirect_policy="reject-non-200-no-follow",
-        peer_requirement=_ZBOOK_HOST,
-        deadline_policy="absolute-monotonic-per-operation-v1",
-    )
-
-
-def _injected_socket_test_attestation(
-    endpoint_url: str, endpoint_class: str
-) -> TransportAttestation:
-    return TransportAttestation(
-        endpoint_url=endpoint_url,
-        endpoint_class=endpoint_class,
-        implementation="offline-injected-socket-test-v1",
-        proxy_policy="injected-factory-not-production",
-        redirect_policy="reject-non-200-no-follow",
-        peer_requirement=_ZBOOK_HOST,
-        deadline_policy="injected-clock-or-factory-not-production",
-    )
-
-
-def _validated_client_attestation(
-    client: Any,
-    *,
-    endpoint_url: str,
-    endpoint_class: str,
-) -> TransportAttestation:
-    attestation = getattr(client, "attestation", None)
-    if type(attestation) is not TransportAttestation:
-        raise SynthesisInputError(
-            "completion client requires an explicit immutable transport attestation"
-        )
-    if (
-        attestation.endpoint_url != endpoint_url
-        or attestation.endpoint_class != endpoint_class
-        or attestation.peer_requirement != _ZBOOK_HOST
-    ):
-        raise SynthesisInputError(
-            "completion client transport attestation differs from configuration"
-        )
-    return attestation
-
-
-def _remaining_seconds(deadline: float, clock: Callable[[], float]) -> float:
-    remaining = deadline - clock()
-    if not math.isfinite(remaining) or remaining <= 0:
-        raise SynthesisTimeoutError()
-    return remaining
-
-
-class _SocketReader:
-    def __init__(
-        self,
-        sock: Any,
-        *,
-        initial: bytes = b"",
-        deadline: float,
-        clock: Callable[[], float],
-    ) -> None:
-        self.sock = sock
-        self.buffer = bytearray(initial)
-        self.deadline = deadline
-        self.clock = clock
-
-    def _recv(self, maximum: int = _HTTP_READ_CHUNK) -> bytes:
-        remaining = _remaining_seconds(self.deadline, self.clock)
-        try:
-            self.sock.settimeout(remaining)
-            chunk = self.sock.recv(maximum)
-        except (TimeoutError, socket.timeout) as exc:
-            raise SynthesisTimeoutError() from exc
-        except OSError as exc:
-            raise SynthesisClientError(code="transport-read-error") from exc
-        _remaining_seconds(self.deadline, self.clock)
-        if not isinstance(chunk, bytes):
-            raise SynthesisClientError(code="transport-invalid-read")
-        return chunk
-
-    def read_until(self, marker: bytes, *, limit: int, label: str) -> bytes:
-        while True:
-            index = self.buffer.find(marker)
-            if index >= 0:
-                value = bytes(self.buffer[:index])
-                del self.buffer[: index + len(marker)]
-                return value
-            if len(self.buffer) >= limit:
-                raise SynthesisClientError(
-                    f"model endpoint {label} exceeded its byte limit",
-                    code=f"http-{label}-too-large",
-                    phase="http-response",
-                )
-            chunk = self._recv(min(_HTTP_READ_CHUNK, limit - len(self.buffer)))
-            if not chunk:
-                raise SynthesisClientError(
-                    f"model endpoint closed during {label}",
-                    code=f"http-{label}-truncated",
-                    phase="http-response",
-                )
-            self.buffer.extend(chunk)
-
-    def read_exact(self, count: int, *, label: str) -> bytes:
-        while len(self.buffer) < count:
-            chunk = self._recv(min(_HTTP_READ_CHUNK, count - len(self.buffer)))
-            if not chunk:
-                raise SynthesisClientError(
-                    f"model endpoint closed during {label}",
-                    code=f"http-{label}-truncated",
-                    phase="http-response",
-                )
-            self.buffer.extend(chunk)
-        value = bytes(self.buffer[:count])
-        del self.buffer[:count]
-        return value
-
-
-_HTTP_TOKEN_BYTES = frozenset(
-    b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-)
-
-
-def _parse_http_headers(header_block: bytes) -> dict[str, str]:
-    lines = header_block.split(b"\r\n")
-    if not lines or len(lines) > _MAX_HTTP_HEADER_LINES + 1:
-        raise SynthesisClientError(
-            "model endpoint returned too many HTTP header lines",
-            code="http-header-count",
-            phase="http-response",
-        )
-    if any(len(line) > _MAX_HTTP_LINE_BYTES for line in lines):
-        raise SynthesisClientError(
-            "model endpoint returned an oversized HTTP line",
-            code="http-line-too-large",
-            phase="http-response",
-        )
-    try:
-        status = lines[0].decode("ascii", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise SynthesisClientError(
-            "model endpoint returned a non-ASCII HTTP status",
-            code="http-status-encoding",
-            phase="http-response",
-        ) from exc
-    parts = status.split(" ", 2)
-    if len(parts) < 2 or parts[0] != "HTTP/1.1" or parts[1] != "200":
-        raise SynthesisClientError(
-            "model endpoint did not return exact HTTP/1.1 status 200",
-            code="http-status-not-200",
-            phase="http-response",
-        )
-
-    headers: dict[str, str] = {}
-    for raw_line in lines[1:]:
-        if not raw_line:
-            raise SynthesisClientError(
-                "model endpoint returned an unexpected blank header line",
-                code="http-header-blank",
-                phase="http-response",
-            )
-        if raw_line[:1] in {b" ", b"\t"}:
-            raise SynthesisClientError(
-                "model endpoint returned an obsolete folded header",
-                code="http-header-obs-fold",
-                phase="http-response",
-            )
-        name, separator, value = raw_line.partition(b":")
-        if (
-            not separator
-            or not name
-            or any(byte not in _HTTP_TOKEN_BYTES for byte in name)
-        ):
-            raise SynthesisClientError(
-                "model endpoint returned an invalid HTTP header name",
-                code="http-header-name",
-                phase="http-response",
-            )
-        try:
-            key = name.decode("ascii").casefold()
-            decoded_value = value.decode("iso-8859-1").strip(" \t")
-        except UnicodeError as exc:  # defensive; both codecs are total here
-            raise SynthesisClientError(
-                code="http-header-encoding", phase="http-response"
-            ) from exc
-        if key in headers:
-            raise SynthesisClientError(
-                "model endpoint returned a duplicate HTTP header",
-                code="http-header-duplicate",
-                phase="http-response",
-            )
-        headers[key] = decoded_value
-
-    content_type = headers.get("content-type")
-    if content_type is None:
-        raise SynthesisClientError(
-            "model endpoint omitted Content-Type",
-            code="http-content-type-missing",
-            phase="http-response",
-        )
-    media_parts = [part.strip().casefold() for part in content_type.split(";")]
-    if media_parts[0] != "application/json" or any(
-        part != "charset=utf-8" for part in media_parts[1:]
-    ):
-        raise SynthesisClientError(
-            "model endpoint Content-Type must be application/json UTF-8",
-            code="http-content-type",
-            phase="http-response",
-        )
-    if headers.get("content-encoding", "identity").casefold() != "identity":
-        raise SynthesisClientError(
-            "compressed model responses are not accepted",
-            code="http-content-encoding",
-            phase="http-response",
-        )
-    if "upgrade" in headers or "trailer" in headers:
-        raise SynthesisClientError(
-            "HTTP upgrade and trailer negotiation are not accepted",
-            code="http-unsupported-framing",
-            phase="http-response",
-        )
-    return headers
-
-
-def _read_http_body(
-    reader: _SocketReader,
-    headers: Mapping[str, str],
-    *,
-    max_response_bytes: int,
-) -> bytes:
-    content_length = headers.get("content-length")
-    transfer_encoding = headers.get("transfer-encoding")
-    if content_length is not None and transfer_encoding is not None:
-        raise SynthesisClientError(
-            "model endpoint returned conflicting HTTP body framing",
-            code="http-framing-conflict",
-            phase="http-response",
-        )
-    if content_length is not None:
-        if not content_length.isascii() or not content_length.isdecimal():
-            raise SynthesisClientError(
-                "model endpoint returned an invalid Content-Length",
-                code="http-content-length",
-                phase="http-response",
-            )
-        try:
-            length = int(content_length)
-        except ValueError as exc:
-            raise SynthesisClientError(
-                "model endpoint returned an unbounded Content-Length",
-                code="http-content-length",
-                phase="http-response",
-            ) from exc
-        if length > max_response_bytes:
-            raise SynthesisClientError(
-                "model endpoint response exceeded the configured byte limit",
-                code="response-too-large",
-                phase="http-response",
-            )
-        payload = reader.read_exact(length, label="body")
-        if reader.buffer:
-            raise SynthesisClientError(
-                "model endpoint returned bytes beyond Content-Length",
-                code="http-body-overrun",
-                phase="http-response",
-            )
-        return payload
-
-    if transfer_encoding is None or transfer_encoding.casefold() != "chunked":
-        raise SynthesisClientError(
-            "model endpoint response requires Content-Length or exact chunked framing",
-            code="http-framing-missing",
-            phase="http-response",
-        )
-    payload = bytearray()
-    while True:
-        raw_size = reader.read_until(
-            b"\r\n", limit=128, label="chunk-size-line"
-        )
-        if not raw_size or b";" in raw_size or any(
-            byte not in b"0123456789abcdefABCDEF" for byte in raw_size
-        ):
-            raise SynthesisClientError(
-                "model endpoint returned an invalid chunk size",
-                code="http-chunk-size",
-                phase="http-response",
-            )
-        chunk_size = int(raw_size, 16)
-        if chunk_size == 0:
-            trailer = reader.read_until(
-                b"\r\n", limit=_MAX_HTTP_LINE_BYTES, label="chunk-trailer"
-            )
-            if trailer or reader.buffer:
-                raise SynthesisClientError(
-                    "model endpoint chunk trailers are not accepted",
-                    code="http-chunk-trailer",
-                    phase="http-response",
-                )
-            return bytes(payload)
-        if len(payload) + chunk_size > max_response_bytes:
-            raise SynthesisClientError(
-                "model endpoint response exceeded the configured byte limit",
-                code="response-too-large",
-                phase="http-response",
-            )
-        payload.extend(reader.read_exact(chunk_size, label="chunk-data"))
-        if reader.read_exact(2, label="chunk-delimiter") != b"\r\n":
-            raise SynthesisClientError(
-                "model endpoint returned an invalid chunk delimiter",
-                code="http-chunk-delimiter",
-                phase="http-response",
-            )
-
-
-def _connect_numeric_loopback(address: tuple[str, int], timeout: float) -> Any:
-    """Connect with AF_INET directly; never enter ``getaddrinfo`` or DNS."""
-
-    if address != (_ZBOOK_HOST, _ZBOOK_PORT):
-        raise AssertionError("direct transport address escaped the ZBook boundary")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
-    try:
-        sock.settimeout(timeout)
-        sock.connect(address)
-    except BaseException:
-        try:
-            sock.close()
-        except OSError:
-            pass
-        raise
-    return sock
+DEFAULT_TRANSPORT = "http-client-v1"
+INJECTED_TRANSPORT = "injected-client"
 
 
 class OpenAICompatibleClient:
-    """Direct, proxy-free HTTP/1.1 client for the exact ZBook loopback peer."""
+    """POST chat completions to one configured OpenAI-compatible server."""
 
-    def __init__(
-        self,
-        endpoint: str = DEFAULT_ENDPOINT,
-        *,
-        policy: EndpointPolicy | None = None,
-        _socket_factory: Callable[[tuple[str, int], float], Any] | None = None,
-        _clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.policy = policy or EndpointPolicy()
-        self.endpoint_url, self.endpoint_class = _normalized_endpoint(
-            endpoint, self.policy
-        )
-        if not self.policy.strict_zbook_local:
-            raise SynthesisInputError(
-                "the direct Stage 5 client requires the strict ZBook-local policy"
-            )
-        test_seam = _socket_factory is not None or _clock is not time.monotonic
-        attestation_factory = (
-            _injected_socket_test_attestation
-            if test_seam
-            else _direct_transport_attestation
-        )
-        self.attestation = attestation_factory(
-            self.endpoint_url, self.endpoint_class
-        )
-        self._socket_factory = _socket_factory or _connect_numeric_loopback
-        self._clock = _clock
-        self.last_peer_host: str | None = None
+    implementation = DEFAULT_TRANSPORT
+
+    def __init__(self, endpoint: str = DEFAULT_ENDPOINT, *, api_key: str | None = None) -> None:
+        self.endpoint_url = _normalized_endpoint(endpoint)
+        self._api_key = api_key
 
     def complete(
         self,
@@ -2746,93 +2215,25 @@ class OpenAICompatibleClient:
         timeout_seconds: float,
         max_response_bytes: int,
     ) -> bytes:
+        from .transport import TransportError, TransportTimeout, request
+
         if type(request_body) is not bytes:
             raise SynthesisClientError(code="request-not-bytes")
-        if (
-            type(timeout_seconds) not in {int, float}
-            or not math.isfinite(float(timeout_seconds))
-            or timeout_seconds <= 0
-        ):
-            raise SynthesisClientError(code="invalid-timeout")
-        if (
-            type(max_response_bytes) is not int
-            or max_response_bytes <= 0
-        ):
-            raise SynthesisClientError(code="invalid-response-limit")
-
-        parsed = urllib.parse.urlsplit(self.endpoint_url)
-        path = parsed.path
-        host_header = f"{_ZBOOK_HOST}:{_ZBOOK_PORT}"
-        request_head = (
-            f"POST {path} HTTP/1.1\r\n"
-            f"Host: {host_header}\r\n"
-            "Accept: application/json\r\n"
-            "Content-Type: application/json; charset=utf-8\r\n"
-            f"Content-Length: {len(request_body)}\r\n"
-            "Connection: close\r\n"
-            "User-Agent: AutoTLDR/synthesis-v2\r\n"
-            "\r\n"
-        ).encode("ascii")
-        outbound = request_head + request_body
-        deadline = self._clock() + float(timeout_seconds)
-        sock: Any | None = None
         try:
-            remaining = _remaining_seconds(deadline, self._clock)
-            try:
-                sock = self._socket_factory((_ZBOOK_HOST, _ZBOOK_PORT), remaining)
-            except (TimeoutError, socket.timeout) as exc:
-                raise SynthesisTimeoutError() from exc
-            except OSError as exc:
-                raise SynthesisClientError(code="transport-connect-error") from exc
-            _remaining_seconds(deadline, self._clock)
-            try:
-                peer = sock.getpeername()
-            except OSError as exc:
-                raise SynthesisClientError(code="transport-peer-unavailable") from exc
-            if (
-                not isinstance(peer, tuple)
-                or not peer
-                or peer[0] != _ZBOOK_HOST
-            ):
-                raise SynthesisClientError(
-                    "model transport peer is not exact numeric loopback",
-                    code="transport-peer-mismatch",
-                )
-            self.last_peer_host = peer[0]
-
-            view = memoryview(outbound)
-            while view:
-                remaining = _remaining_seconds(deadline, self._clock)
-                try:
-                    sock.settimeout(remaining)
-                    sent = sock.send(view)
-                except (TimeoutError, socket.timeout) as exc:
-                    raise SynthesisTimeoutError() from exc
-                except OSError as exc:
-                    raise SynthesisClientError(code="transport-write-error") from exc
-                _remaining_seconds(deadline, self._clock)
-                if type(sent) is not int or sent <= 0:
-                    raise SynthesisClientError(code="transport-short-write")
-                view = view[sent:]
-
-            reader = _SocketReader(
-                sock, deadline=deadline, clock=self._clock
+            return request(
+                "POST",
+                self.endpoint_url,
+                body=request_body,
+                api_key=self._api_key,
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=max_response_bytes,
             )
-            header_block = reader.read_until(
-                b"\r\n\r\n", limit=_MAX_HTTP_HEADER_BYTES, label="headers"
-            )
-            headers = _parse_http_headers(header_block)
-            payload = _read_http_body(
-                reader, headers, max_response_bytes=max_response_bytes
-            )
-            _remaining_seconds(deadline, self._clock)
-            return payload
-        finally:
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
+        except TransportTimeout as exc:
+            raise SynthesisTimeoutError(str(exc)) from exc
+        except TransportError as exc:
+            raise SynthesisClientError(
+                str(exc), code=exc.code, phase="http-response" if exc.status else "transport"
+            ) from exc
 
 
 def _strict_json_loads(text: str, *, label: str) -> Any:
@@ -2902,23 +2303,23 @@ def _strict_identifier(value: Any, *, label: str) -> str:
 @dataclass(frozen=True, slots=True)
 class ResponseEnvelope:
     content: str
-    response_id: str
-    created: int
     served_model: str
     finish_reason: str
-    system_fingerprint: str | None
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
+    response_id: str | None = None
+    created: int | None = None
+    system_fingerprint: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
     reasoning_tokens: int | None = None
-    provider_compatibility: Mapping[str, Any] | None = None
+    reasoning: Mapping[str, Any] | None = None
 
     def record(self) -> dict[str, Any]:
-        usage: dict[str, Any] = {
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
-        }
+        usage: dict[str, Any] = {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = getattr(self, key)
+            if value is not None:
+                usage[key] = value
         if self.reasoning_tokens is not None:
             usage["completion_tokens_details"] = {
                 "reasoning_tokens": self.reasoning_tokens,
@@ -2929,89 +2330,33 @@ class ResponseEnvelope:
             "served_model": self.served_model,
             "finish_reason": self.finish_reason,
             "system_fingerprint": self.system_fingerprint,
-            "usage": usage,
+            "usage": usage or None,
         }
-        if self.provider_compatibility is not None:
-            record["provider_compatibility"] = dict(self.provider_compatibility)
+        if self.reasoning is not None:
+            record["reasoning"] = dict(self.reasoning)
         return record
 
 
-def _lm_studio_compatibility_record(
-    stats: Any,
-    reasoning_content: Any,
-) -> dict[str, Any]:
-    """Validate and bind the exact inert extras emitted by LM Studio 0.3.x.
+def _optional_identifier(value: Any, *, label: str) -> str | None:
+    if value is None:
+        return None
+    return _strict_identifier(value, label=label)
 
-    The local server emits speculative-decoding counters plus a separate
-    reasoning channel even when callers request an OpenAI-compatible response.
-    That channel never becomes claim authority: its bytes are discarded after
-    hashing and only the ordinary ``message.content`` enters schema validation.
-    Any field or type outside this observed profile still fails closed.
-    """
 
-    expected_stats = {
-        "accepted_draft_tokens_count",
-        "rejected_draft_tokens_count",
-        "total_draft_tokens_count",
-    }
-    # A model loaded without a draft model reports `"stats": {}`. That is the
-    # absence of speculative decoding, not an unqualified provider extra, and
-    # refusing it locked out every model that does not speculate. The counters
-    # are still all-or-nothing: a partial set fails closed.
-    if type(stats) is not dict or (set(stats) and set(stats) != expected_stats):
-        raise SynthesisValidationError(
-            "LM Studio stats fields are outside the qualified profile",
-            code="response-provider-stats-fields",
-        )
-    counters: dict[str, int] = {}
-    for key in sorted(set(stats)):
-        value = stats[key]
-        if type(value) is not int or value < 0:
-            raise SynthesisValidationError(
-                "LM Studio draft token counts must be non-negative integers",
-                code="response-provider-stats-value",
-            )
-        counters[key] = value
-    if counters and counters["total_draft_tokens_count"] != (
-        counters["accepted_draft_tokens_count"]
-        + counters["rejected_draft_tokens_count"]
-    ):
-        raise SynthesisValidationError(
-            "LM Studio total draft tokens must equal accepted plus rejected",
-            code="response-provider-stats-total",
-        )
-    if type(reasoning_content) is not str:
-        raise SynthesisValidationError(
-            "LM Studio reasoning_content must be a string in the qualified profile",
-            code="response-provider-reasoning-type",
-        )
-    try:
-        reasoning_bytes = reasoning_content.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise SynthesisValidationError(
-            "LM Studio reasoning_content is not valid UTF-8",
-            code="response-provider-reasoning-utf8",
-        ) from exc
-    return {
-        "profile": "lm-studio-chat-completion-extras-v1",
-        "reasoning_content": {
-            "authority": "discarded-not-claim-input",
-            "bytes": len(reasoning_bytes),
-            "sha256": _sha256(reasoning_bytes),
-        },
-        "speculative_decoding": counters,
-        "tool_calls": "present-empty",
-    }
+def _optional_count(value: Any) -> int | None:
+    return value if type(value) is int and value >= 0 else None
 
 
 def extract_response_content(
     response_body: bytes, *, config: SynthesisConfig
 ) -> ResponseEnvelope:
-    """Validate one complete OpenAI-compatible response envelope.
+    """Validate the parts of an OpenAI-compatible response that carry authority.
 
-    The historical content-only seam was unsafe because it discarded the
-    served model identity, finish reason, and token accounting. Callers now
-    receive one immutable, fully validated envelope.
+    Servers and gateways add their own fields (timings, provider metadata, cache
+    counters). Those are ignored. What must hold: exactly one choice, a normal
+    ``stop`` finish, the configured model identity, an assistant message with string
+    content, and no refusal or tool call. Any reasoning channel is hashed for audit
+    and never becomes claim input.
     """
 
     if type(response_body) is not bytes:
@@ -3028,208 +2373,89 @@ def extract_response_content(
     envelope = _strict_json_loads(text, label="model HTTP response")
     if type(envelope) is not dict:
         raise SynthesisValidationError("model HTTP response must be an object")
-    required_envelope = {"id", "object", "created", "model", "choices", "usage"}
-    allowed_envelope = required_envelope | {"system_fingerprint", "stats"}
-    if set(envelope) - allowed_envelope or not required_envelope <= set(envelope):
+    if "model" not in envelope:
         raise SynthesisValidationError(
-            "model HTTP response fields are outside the strict envelope",
-            code="response-envelope-fields",
-        )
-    response_id = _strict_identifier(envelope["id"], label="response id")
-    if envelope["object"] != "chat.completion":
-        raise SynthesisValidationError(
-            "model HTTP response object must be chat.completion",
-            code="response-object",
-        )
-    created = envelope["created"]
-    if isinstance(created, bool) or not isinstance(created, int) or created < 0:
-        raise SynthesisValidationError(
-            "model HTTP response created must be a non-negative integer",
-            code="response-created",
+            "model HTTP response does not name the served model",
+            code="served-model-missing",
         )
     served_model = _strict_identifier(envelope["model"], label="served model")
     allowed_models = {config.model, *config.allowed_response_model_aliases}
     if served_model not in allowed_models:
         raise SynthesisValidationError(
-            "served model identity is not the configured model or a frozen alias",
+            f"served model identity {served_model!r} is not the configured model "
+            "or an allowed alias",
             code="served-model-mismatch",
         )
-    system_fingerprint = envelope.get("system_fingerprint")
-    if system_fingerprint is not None:
-        system_fingerprint = _strict_identifier(
-            system_fingerprint, label="system fingerprint"
-        )
-    provider_profile = "stats" in envelope
+    response_id = _optional_identifier(envelope.get("id"), label="response id")
+    created = _optional_count(envelope.get("created"))
+    system_fingerprint = _optional_identifier(
+        envelope.get("system_fingerprint"), label="system fingerprint"
+    )
     choices = envelope.get("choices")
     if type(choices) is not list or len(choices) != 1:
         raise SynthesisValidationError(
-            "model HTTP response must contain exactly one choice"
+            "model HTTP response must contain exactly one choice",
+            code="response-choices",
         )
     choice = choices[0]
     if type(choice) is not dict:
         raise SynthesisValidationError("model choice must be an object")
-    required_choice = {"index", "message", "finish_reason"}
-    allowed_choice = required_choice | {"logprobs"}
-    if set(choice) - allowed_choice or not required_choice <= set(choice):
+    if choice.get("finish_reason") != "stop":
         raise SynthesisValidationError(
-            "model choice fields are outside the strict envelope",
-            code="response-choice-fields",
+            f"model choice must finish with stop, not {choice.get('finish_reason')!r}",
+            code="response-finish-reason",
         )
-    if type(choice["index"]) is not int or choice["index"] != 0:
-        raise SynthesisValidationError(
-            "model choice index must be integer zero", code="response-choice-index"
-        )
-    if choice.get("logprobs") is not None:
-        raise SynthesisValidationError(
-            "model log probabilities are not accepted", code="response-logprobs"
-        )
-    if choice["finish_reason"] != "stop":
-        raise SynthesisValidationError(
-            "model choice must finish with stop", code="response-finish-reason"
-        )
-    if type(choice.get("message")) is not dict:
+    message = choice.get("message")
+    if type(message) is not dict:
         raise SynthesisValidationError("model choice must contain one message object")
-    message = choice["message"]
-    required_message = {"role", "content"}
-    allowed_message = required_message | {
-        "refusal",
-        "tool_calls",
-        "function_call",
-        "reasoning_content",
-    }
-    if set(message) - allowed_message or not required_message <= set(message):
-        raise SynthesisValidationError(
-            "model message fields are outside the strict envelope",
-            code="response-message-fields",
-        )
-    if message["role"] != "assistant":
+    if message.get("role", "assistant") != "assistant":
         raise SynthesisValidationError(
             "model message role must be assistant", code="response-message-role"
         )
-    for forbidden in ("refusal", "function_call"):
-        if message.get(forbidden) is not None:
+    for forbidden in ("refusal", "function_call", "tool_calls"):
+        if message.get(forbidden) not in (None, "", []):
             raise SynthesisValidationError(
                 f"model message {forbidden} is not accepted",
                 code="response-message-authority",
             )
-    tool_calls = message.get("tool_calls")
-    if tool_calls is not None and not (provider_profile and tool_calls == []):
-        raise SynthesisValidationError(
-            "model message tool_calls is not accepted unless it is the empty "
-            "qualified LM Studio compatibility field",
-            code="response-message-authority",
-        )
-    provider_compatibility: dict[str, Any] | None = None
-    if provider_profile:
-        if (
-            "reasoning_content" not in message
-            or "tool_calls" not in message
-            or tool_calls != []
-        ):
-            raise SynthesisValidationError(
-                "LM Studio compatibility fields are incomplete",
-                code="response-provider-fields",
-            )
-        provider_compatibility = _lm_studio_compatibility_record(
-            envelope["stats"], message["reasoning_content"]
-        )
-    elif "reasoning_content" in message:
-        raise SynthesisValidationError(
-            "reasoning_content is accepted only in the qualified LM Studio profile",
-            code="response-provider-fields",
-        )
     content = message.get("content")
     if type(content) is not str or not content:
-        raise SynthesisValidationError("model message content must be a JSON string")
-    try:
-        content.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise SynthesisValidationError("model message content is not valid UTF-8") from exc
+        raise SynthesisValidationError(
+            "model message content must be a non-empty JSON string",
+            code="response-content",
+        )
 
-    usage = envelope["usage"]
-    expected_usage = {"prompt_tokens", "completion_tokens", "total_tokens"}
-    allowed_usage = expected_usage | {"completion_tokens_details"}
-    if (
-        type(usage) is not dict
-        or not expected_usage <= set(usage)
-        or set(usage) - allowed_usage
-    ):
-        raise SynthesisValidationError(
-            "model usage must contain exact prompt/completion/total token counts "
-            "and only the qualified completion detail",
-            code="response-usage-fields",
-        )
-    token_values: dict[str, int] = {}
-    for key in sorted(expected_usage):
-        value = usage[key]
-        if type(value) is not int or value < 0:
-            raise SynthesisValidationError(
-                "model usage token counts must be non-negative integers",
-                code="response-usage-value",
-            )
-        token_values[key] = value
-    if token_values["total_tokens"] != (
-        token_values["prompt_tokens"] + token_values["completion_tokens"]
-    ):
-        raise SynthesisValidationError(
-            "model usage total must equal prompt plus completion tokens",
-            code="response-usage-total",
-        )
-    if token_values["completion_tokens"] > config.max_output_tokens:
-        raise SynthesisValidationError(
-            "model completion exceeded configured max_output_tokens",
-            code="response-token-limit",
-        )
-    reasoning_tokens: int | None = None
-    if "completion_tokens_details" in usage:
-        details = usage["completion_tokens_details"]
-        if type(details) is not dict or set(details) != {"reasoning_tokens"}:
-            raise SynthesisValidationError(
-                "model completion token details must contain only reasoning_tokens",
-                code="response-usage-detail-fields",
-            )
-        reasoning_tokens = details["reasoning_tokens"]
-        if (
-            type(reasoning_tokens) is not int
-            or reasoning_tokens < 0
-            or reasoning_tokens > token_values["completion_tokens"]
-        ):
-            raise SynthesisValidationError(
-                "model reasoning token count must fit completion_tokens",
-                code="response-usage-detail-value",
-            )
-        if provider_compatibility is not None:
-            provider_compatibility = {
-                **provider_compatibility,
-                "usage_detail": "reasoning-tokens-v1",
+    reasoning_record: dict[str, Any] | None = None
+    for key in ("reasoning_content", "reasoning"):
+        reasoning = message.get(key)
+        if type(reasoning) is str and reasoning:
+            reasoning_bytes = reasoning.encode("utf-8", errors="replace")
+            reasoning_record = {
+                "authority": "discarded-not-claim-input",
+                "field": key,
+                "bytes": len(reasoning_bytes),
+                "sha256": _sha256(reasoning_bytes),
             }
-    if config.reasoning_effort == "none":
-        reasoning_record = (
-            provider_compatibility.get("reasoning_content")
-            if provider_compatibility is not None
-            else None
-        )
-        if (
-            reasoning_tokens != 0
-            or type(reasoning_record) is not dict
-            or reasoning_record.get("bytes") != 0
-        ):
-            raise SynthesisValidationError(
-                "LM Studio did not honor the qualified no-reasoning request",
-                code="response-provider-reasoning-not-disabled",
-            )
+            break
+
+    usage = envelope.get("usage")
+    usage = usage if type(usage) is dict else {}
+    details = usage.get("completion_tokens_details")
+    reasoning_tokens = (
+        _optional_count(details.get("reasoning_tokens")) if type(details) is dict else None
+    )
     return ResponseEnvelope(
         content=content,
-        response_id=response_id,
-        created=created,
         served_model=served_model,
         finish_reason="stop",
+        response_id=response_id,
+        created=created,
         system_fingerprint=system_fingerprint,
-        prompt_tokens=token_values["prompt_tokens"],
-        completion_tokens=token_values["completion_tokens"],
-        total_tokens=token_values["total_tokens"],
+        prompt_tokens=_optional_count(usage.get("prompt_tokens")),
+        completion_tokens=_optional_count(usage.get("completion_tokens")),
+        total_tokens=_optional_count(usage.get("total_tokens")),
         reasoning_tokens=reasoning_tokens,
-        provider_compatibility=provider_compatibility,
+        reasoning=reasoning_record,
     )
 
 
@@ -3850,13 +3076,12 @@ def _model_run_record(
     *,
     config: SynthesisConfig,
     endpoint_url: str,
-    endpoint_class: str,
     pack: EvidencePack,
     request_body: bytes,
     response_body: bytes | None,
     message_content: str | None,
     response_envelope: ResponseEnvelope | None,
-    transport_attestation: TransportAttestation,
+    transport: Mapping[str, str],
     elapsed_ns: int,
     outcome: str,
     validation: Mapping[str, Any],
@@ -3867,14 +3092,8 @@ def _model_run_record(
     record = {
         "schema": MODEL_RUN_SCHEMA,
         "task": SYNTHESIS_TASK,
-        "endpoint_class": endpoint_class,
         "endpoint": endpoint_url,
-        "transport": transport_attestation.record(),
-        "endpoint_policy": {
-            "localhost_only": config.endpoint_policy.localhost_only,
-            "allowed_schemes": list(config.endpoint_policy.allowed_schemes),
-            "strict_zbook_local": config.endpoint_policy.strict_zbook_local,
-        },
+        "transport": dict(transport),
         "model": config.model,
         "settings": _settings_record(config),
         "input": {
@@ -4010,9 +3229,7 @@ def synthesize(
         raise SynthesisInputError("synthesis configuration must be a SynthesisConfig")
     SynthesisConfig.__post_init__(config)
     snapshot = _freeze_extraction(extraction)
-    endpoint_url, endpoint_class = _normalized_endpoint(
-        config.endpoint, config.endpoint_policy
-    )
+    endpoint_url = _normalized_endpoint(config.endpoint)
     pack = build_evidence_pack(
         snapshot,
         budget_bytes=config.evidence_budget_bytes,
@@ -4022,16 +3239,15 @@ def synthesize(
     request_body = build_chat_request(pack, config)
     active_client: CompletionClient
     if client is None:
-        active_client = OpenAICompatibleClient(
-            config.endpoint, policy=config.endpoint_policy
-        )
+        active_client = OpenAICompatibleClient(config.endpoint, api_key=config.api_key)
+        implementation = DEFAULT_TRANSPORT
     else:
         active_client = client
-    transport_attestation = _validated_client_attestation(
-        active_client,
-        endpoint_url=endpoint_url,
-        endpoint_class=endpoint_class,
-    )
+        implementation = INJECTED_TRANSPORT
+    transport = {
+        "implementation": implementation,
+        "authorization": "bearer" if config.api_key is not None else "none",
+    }
 
     response_body: bytes | None = None
     message_content: str | None = None
@@ -4110,13 +3326,12 @@ def synthesize(
         run = _model_run_record(
             config=config,
             endpoint_url=endpoint_url,
-            endpoint_class=endpoint_class,
             pack=pack,
             request_body=request_body,
             response_body=response_body,
             message_content=message_content,
             response_envelope=response_envelope,
-            transport_attestation=transport_attestation,
+            transport=transport,
             elapsed_ns=elapsed_ns,
             outcome="success",
             validation=validation,
@@ -4155,13 +3370,12 @@ def synthesize(
         run = _model_run_record(
             config=config,
             endpoint_url=endpoint_url,
-            endpoint_class=endpoint_class,
             pack=pack,
             request_body=request_body,
             response_body=response_body,
             message_content=message_content,
             response_envelope=response_envelope,
-            transport_attestation=transport_attestation,
+            transport=transport,
             elapsed_ns=elapsed_ns,
             outcome=f"{outcome_prefix}-{failure_kind}",
             validation=validation,
@@ -4184,13 +3398,12 @@ def synthesize(
     run = _model_run_record(
         config=config,
         endpoint_url=endpoint_url,
-        endpoint_class=endpoint_class,
         pack=pack,
         request_body=request_body,
         response_body=response_body,
         message_content=message_content,
         response_envelope=response_envelope,
-        transport_attestation=transport_attestation,
+        transport=transport,
         elapsed_ns=elapsed_ns,
         outcome=f"{outcome_prefix}-{failure_kind}",
         validation=validation,
@@ -4209,7 +3422,6 @@ __all__ = [
     "EVIDENCE_SCHEMA",
     "EvidenceBudgetError",
     "EvidencePack",
-    "EndpointPolicy",
     "MAX_CLAIMS",
     "MAX_CLAIM_BYTES",
     "MAX_EVIDENCE_UNITS",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble a version-bound, checksummed private-alpha participant bundle."""
+"""Assemble a version-bound, checksummed AutoTLDR release bundle."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "autotldr-private-alpha-bundle-v1"
+SCHEMA = "autotldr-release-bundle-v1"
 PACKAGE = "autotldr"
 TEMPLATE_FIELDS = ("{{VERSION}}", "{{SUPPORT}}")
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
@@ -116,7 +116,7 @@ def _file_record(path: Path, *, root: Path) -> dict[str, Any]:
 
 
 def _write_deterministic_zip(root: Path, destination: Path, *, version: str) -> None:
-    archive_root = f"autotldr-{version}-private-alpha"
+    archive_root = f"autotldr-{version}"
     with zipfile.ZipFile(destination, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(item for item in root.rglob("*") if item.is_file()):
             relative = path.relative_to(root).as_posix()
@@ -146,7 +146,7 @@ def build_bundle(
 
     wheel, sdist, version = _release_pair(dist)
     required_sources = {
-        "guide": repository / "docs" / "private-alpha-guide.md",
+        "guide": repository / "docs" / "install-guide.md",
         "changelog": repository / "docs" / "changelog.md",
         "security": repository / "docs" / "security.md",
         "license": repository / "LICENSE",
@@ -183,7 +183,7 @@ def build_bundle(
             "package": PACKAGE,
             "version": version,
             "support": support,
-            "break_policy": "pre-alpha interfaces may change between builds",
+            "break_policy": "0.x interfaces may evolve between releases",
             "files": [_file_record(path, root=temporary) for path in payload_files],
         }
         manifest_path = temporary / "manifest.json"
@@ -227,7 +227,7 @@ def build_bundle(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build a checksummed AutoTLDR private-alpha participant bundle."
+        description="Build a checksummed AutoTLDR release bundle."
     )
     parser.add_argument("dist", type=Path, metavar="DIST_DIRECTORY")
     parser.add_argument("output", type=Path, metavar="NEW_OUTPUT_DIRECTORY")
@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
             repository=repository,
         )
     except (BundleError, OSError, UnicodeError) as exc:
-        print(f"autotldr alpha bundle: {exc}", file=sys.stderr)
+        print(f"autotldr release bundle: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return 0

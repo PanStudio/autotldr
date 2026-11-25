@@ -140,7 +140,12 @@ class _LocalSnapshotContext:
             os.fchmod(snapshot_fd, 0o600)
             digest = hashlib.sha256()
             byte_count = 0
-            while chunk := os.read(source_fd, _SNAPSHOT_CHUNK_BYTES):
+            # A live writer must not keep acquisition chasing an ever-growing
+            # EOF. At most the observed size plus one growth-detection byte is
+            # read; the normal identity check below then rejects the change.
+            while chunk := os.read(
+                source_fd, min(_SNAPSHOT_CHUNK_BYTES, before.st_size + 1 - byte_count)
+            ):
                 digest.update(chunk)
                 byte_count += len(chunk)
                 _write_all(snapshot_fd, chunk)

@@ -4,6 +4,11 @@ This is the preregistered private-alpha learning plan. It exists to keep product
 from being rewritten after seeing favorable or unfavorable sessions. The product contract
 is `product-alpha.md`; the reproducible engineering gate is `../acceptance/README.md`.
 
+**Release update, 2026-09-17:** D-055 makes owner acceptance and exact-commit CI the
+publication gates for v0.2.0. This five-user study remains follow-up research with its
+original measures and thresholds intact. No completed sessions or passing cohort are
+claimed.
+
 ## Cohort
 
 Recruit five terminal-capable users who did not work on AutoTLDR:
@@ -71,10 +76,10 @@ cohort, and `2` for incomplete, unsafe, or structurally invalid records. Keep se
 and the report in gitignored `.agent/` state unless participants explicitly authorize a
 different retention boundary. Durable conclusions contain aggregate findings only.
 
-## Private-alpha gate
+## Preregistered study criteria
 
-Proceed from invited preview to a broader public alpha only when all of the following are
-true across the five sessions:
+The original private-alpha gate required all of the following across five sessions.
+Evaluate the follow-up study against these same criteria:
 
 - at least four participants reach green doctor without developer intervention;
 - all five receive either a valid cited TLDR or a specific actionable decline—never an
@@ -92,19 +97,20 @@ class before adding formats.
 
 ## Release posture
 
-The first cohort should receive the generated private-alpha bundle through a versioned
-GitHub prerelease. The bundle contains the exact wheel and sdist, rendered participant
+The first cohort should receive a versioned release bundle. The bundle contains the exact
+wheel and sdist, rendered participant
 guide, security and change notes, manifest, and checksums. Its builder requires an explicit
 support contact and refuses overwrite:
 
 ```bash
 uv build --out-dir dist
 uv run python scripts/check_release.py dist
-uv run python scripts/build_alpha_bundle.py \
-  dist /new/path/autotldr-private-alpha \
+uv run python scripts/build_release_bundle.py \
+  dist /new/path/autotldr-release \
   --support "PRIVATE SUPPORT CONTACT"
 ```
 
-The participant sees the rendered form of `private-alpha-guide.md`, not checkout/developer
-installation instructions. Public PyPI publication waits until the five-session gate,
-remote CI, clean installation, and the documented support boundary all pass.
+The participant sees the rendered form of `install-guide.md`, with an exact version and
+support contact. Publication follows D-055: owner acceptance, remote CI for the reviewed
+commit, clean installation, and the documented support boundary. Registry publication
+must be recorded separately from a GitHub release.
