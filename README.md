@@ -99,6 +99,13 @@ Routers and gateways that load models on demand may make the first request slow,
 setup's `--timeout` (default 120 seconds, maximum 300) applies to each model request.
 Use `https://` for servers you reach over untrusted networks.
 
+PanCode users can install the pack in [`pancode/`](pancode/README.md), which starts
+AutoTLDR's MCP server through `uvx` at the exact release, rooted at the home directory
+with hidden paths refused, and classes its tool as read. Evidence mode works offline;
+prose mode from the pack needs a configured model server that takes no key, because
+PanCode passes the server no credential. The pack page covers install, the two
+approvals, the root rule and extras.
+
 ## Use it
 
 ### Choose how much explanation you need
@@ -218,6 +225,9 @@ with explicit source roots:
 autotldr integrations skill --install /path/to/skills
 autotldr mcp --root /path/to/project --root /path/to/data
 ```
+
+Add `--refuse-hidden-sources` to refuse any source whose resolved path passes through a
+dot-named directory or file below its root, such as `~/.ssh` under a `--root ~`.
 
 ## Trust and current limits
 

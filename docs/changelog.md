@@ -19,6 +19,12 @@ before 0.2.0 record development checkpoints.
   `autotldr setup --force`. The MCP error code is now `MODEL_UNAVAILABLE`.
 - Archived the frozen Stage 5 synthesis benchmark's live run, which depended on the
   removed ZBook transport; its policies and freeze reproduction remain.
+- `autotldr-mcp` and `autotldr mcp` accept `--refuse-hidden-sources`, which refuses a
+  source whose resolved path passes through a dot-named entry below its root, including
+  through a visible symlink. Deferred tasks keep the setting they were created with (D-057).
+- Added a PanCode pack in `pancode/`: it launches `autotldr-mcp` through
+  `uvx --from autotldr==0.2.0`, rooted at the home directory with hidden sources refused,
+  and classes `autotldr_summarize` as read. See `pancode/README.md`.
 
 - Corrected spreadsheet dependencies using native formula tokens: strings and function
   names cannot invent cell references, quoted sheet names retain their identity, and ranges
