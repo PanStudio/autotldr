@@ -3,7 +3,7 @@
 Commands, configuration, and output schemas may evolve during 0.x development. Entries
 before 0.2.0 record development checkpoints.
 
-## 0.2.0 — any OpenAI-compatible inference server — unreleased
+## 0.2.0 — any OpenAI-compatible inference server — 2026-11-25
 
 - Replaced the LM Studio-only loopback transport with one OpenAI-compatible HTTP client.
   Configure `base_url`, `name`, optional `api_key_env`, and `timeout_seconds`; http and
