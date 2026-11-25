@@ -336,6 +336,14 @@ def test_v2_sidecars_are_hash_pinned_and_forbid_aggregate_accuracy():
     assert schema["model_generated_review_allowed"] is False
 
 
+def _without_sqlite_writer_version(payloads: dict[str, bytes]) -> dict[str, bytes]:
+    # SQLite stamps the writing library's SQLITE_VERSION_NUMBER at header offset
+    # 96. The interpreter's SQLite, not uv.lock, decides it, so a rebuild on
+    # another Python differs from the checked fixture in those four bytes only.
+    sqlite = payloads["safety.sqlite"]
+    return {**payloads, "safety.sqlite": sqlite[:96] + sqlite[100:]}
+
+
 def test_final_tier3_fixtures_and_manifest_are_repeat_build_deterministic(
     tmp_path, monkeypatch
 ):
@@ -383,10 +391,10 @@ def test_final_tier3_fixtures_and_manifest_are_repeat_build_deterministic(
     second_canaries = hero_builder.read_raw_canaries()
     second_manifest = hero_builder._manifest()
 
-    assert first_payloads == second_payloads == checked_payloads
-    assert {
-        name: evaluate._sha256(payload) for name, payload in first_payloads.items()
-    } == TIER3_FIXTURE_SHA256
+    assert first_payloads == second_payloads
+    assert _without_sqlite_writer_version(
+        first_payloads
+    ) == _without_sqlite_writer_version(checked_payloads)
     assert first_manifest == second_manifest
     assert first_canaries == second_canaries == RAW_ONLY_CANARIES
 

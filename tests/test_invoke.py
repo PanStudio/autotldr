@@ -225,17 +225,19 @@ def _structured_budget_report(shape: str, stdout: str):
 
 @pytest.mark.parametrize("shape", ["json", "jsonl"])
 def test_budget_covers_the_complete_parseable_structured_output(
-    tmp_path, capsys, shape
+    tmp_path, capsys, monkeypatch, shape
 ):
     path, oversized = _large_document(tmp_path)
     # The complete envelope includes the required input hash/timing manifest
     # and a concrete identity record for every omission.  Six KiB leaves room
     # for the compact semantic units while still forcing the 20 KiB atomic
-    # appendix to be dropped.
+    # appendix to be dropped.  A relative source keeps that size independent
+    # of how long the temporary directory path is.
     requested = 6144
+    monkeypatch.chdir(tmp_path)
 
     status, stdout, stderr = _invoke(
-        capsys, [str(path), "--out", shape, "--budget", str(requested)]
+        capsys, [path.name, "--out", shape, "--budget", str(requested)]
     )
     report, selected = _structured_budget_report(shape, stdout)
     used = len(stdout.encode("utf-8"))

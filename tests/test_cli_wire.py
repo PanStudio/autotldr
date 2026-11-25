@@ -13,13 +13,16 @@ def test_stdout_is_canonical_utf8_even_when_pythonioencoding_disagrees(tmp_path)
     source.write_text("# Café 🧪\n\nA naïve but addressable claim.\n", encoding="utf-8")
     environment = dict(os.environ)
     environment["PYTHONIOENCODING"] = "utf-16"
+    environment["AUTOTLDR_CONFIG"] = str(tmp_path / "missing-config.toml")
 
+    # A relative source keeps the output size, and so the fixed budget's
+    # selection, independent of how long the temporary directory path is.
     completed = subprocess.run(
         [
             sys.executable,
             "-m",
             "autotldr.cli",
-            str(source),
+            source.name,
             "--out",
             "json",
             "--budget",
