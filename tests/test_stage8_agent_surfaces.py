@@ -803,8 +803,9 @@ def test_pancode_pack_pins_this_release_and_classes_the_served_tool_read():
     servers = json.loads((pack / "mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert (pack / "LICENSE").read_bytes() == (ROOT / "LICENSE").read_bytes()
+    assert (pack / "NOTICE").read_bytes() == (ROOT / "NOTICE").read_bytes()
     assert plugin["version"] == __version__
-    assert plugin["license"] == project["project"]["license"]["text"] == "MIT"
+    assert plugin["license"] == project["project"]["license"] == "Apache-2.0"
     assert plugin["description"] == project["project"]["description"]
     assert list(servers) == ["autotldr"]
     server = servers["autotldr"]

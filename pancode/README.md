@@ -3,7 +3,7 @@
 This pack adds AutoTLDR's MCP server to PanCode. It serves one tool,
 `autotldr_summarize`, which reads local files and directories and returns what
 they mean with every claim addressed back to its source. AutoTLDR and this pack
-are MIT licensed.
+are licensed under the Apache License 2.0.
 
 ## Install
 

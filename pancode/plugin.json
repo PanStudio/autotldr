@@ -4,9 +4,9 @@
   "version": "0.2.1",
   "description": "Point it at anything. Get back what it means, in the shape you asked for.",
   "author": { "name": "Anthony Kougkas" },
-  "homepage": "https://github.com/akougkas/AutoTLDR",
-  "repository": "https://github.com/akougkas/AutoTLDR",
-  "license": "MIT",
+  "homepage": "https://github.com/PanStudio/autotldr",
+  "repository": "https://github.com/PanStudio/autotldr",
+  "license": "Apache-2.0",
   "keywords": ["summarize", "evidence", "mcp"],
   "extensions": { "dev.pancode": { "manifestVersion": 1, "compatibility": { "pancode": ">=0.9.0-0" } } }
 }

@@ -8,7 +8,7 @@ Only the bounded evidence pack for each run travels to that server.
 ## 1. Install
 
 ```bash
-git clone https://github.com/akougkas/AutoTLDR.git
+git clone https://github.com/PanStudio/autotldr.git
 cd AutoTLDR
 uv venv --python 3.12
 uv pip install -e '.[all]'

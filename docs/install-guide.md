@@ -53,7 +53,7 @@ autotldr doctor
 
 Without `--model`, setup prints the IDs the server lists. `doctor` sends one small
 synthetic request and does not read your artifacts. Continue when it reports ready.
-The walkthrough is at <https://github.com/akougkas/AutoTLDR/blob/main/docs/try-it.md>.
+The walkthrough is at <https://github.com/PanStudio/autotldr/blob/main/docs/try-it.md>.
 
 ## Try one real artifact
 

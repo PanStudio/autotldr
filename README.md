@@ -51,7 +51,7 @@ autotldr --version
 From a checkout:
 
 ```bash
-git clone https://github.com/akougkas/AutoTLDR.git
+git clone https://github.com/PanStudio/autotldr.git
 cd AutoTLDR
 uv venv --python 3.12
 uv pip install -e '.[all]'
@@ -266,6 +266,6 @@ The [first-user study](docs/first-user-validation.md) remains a follow-up learni
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Part of Anthony Kougkas's agentic engineering work: [akougkas.io/work/agentic-engineering](https://akougkas.io/work/agentic-engineering/)
