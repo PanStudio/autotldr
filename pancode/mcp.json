@@ -3,7 +3,7 @@
     "autotldr": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["--from", "autotldr==0.2.1", "autotldr-mcp", "--root", "~", "--refuse-hidden-sources"],
+      "args": ["--from", "autotldr==0.2.2", "autotldr-mcp", "--root", "~", "--refuse-hidden-sources"],
       "timeoutMs": 600000,
       "toolActionClasses": { "autotldr_summarize": "read" }
     }

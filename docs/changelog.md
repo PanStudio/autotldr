@@ -3,6 +3,16 @@
 Commands, configuration, and output schemas may evolve during 0.x development. Entries
 before 0.2.0 record development checkpoints.
 
+## 0.2.2 — Apache-2.0, maintained under PanStudio — unreleased
+
+- AutoTLDR is now licensed under the Apache License 2.0, copyright PanStudio. It was MIT
+  through 0.2.1. The wheel and sdist carry `LICENSE` and `NOTICE`, the package metadata
+  declares `License-Expression: Apache-2.0`, and the release bundle ships `NOTICE`.
+- The repository moved to <https://github.com/PanStudio/autotldr>. The PyPI name stays
+  `autotldr`; releases publish from that repository through PyPI Trusted Publishing.
+- The PanCode pack declares `Apache-2.0`, ships `NOTICE`, points its homepage and
+  repository at PanStudio/autotldr, and launches `uvx --from autotldr==0.2.2`.
+
 ## 0.2.1 — published through PyPI Trusted Publishing — 2026-11-25
 
 - Releases are published by `.github/workflows/publish.yml`: a `v*` tag push checks that
