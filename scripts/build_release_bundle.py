@@ -150,6 +150,7 @@ def build_bundle(
         "changelog": repository / "docs" / "changelog.md",
         "security": repository / "docs" / "security.md",
         "license": repository / "LICENSE",
+        "notice": repository / "NOTICE",
     }
     missing = [str(path) for path in required_sources.values() if not path.is_file()]
     if missing:
@@ -174,6 +175,7 @@ def build_bundle(
         shutil.copyfile(required_sources["changelog"], temporary / "CHANGELOG.md")
         shutil.copyfile(required_sources["security"], temporary / "SECURITY.md")
         shutil.copyfile(required_sources["license"], temporary / "LICENSE")
+        shutil.copyfile(required_sources["notice"], temporary / "NOTICE")
 
         payload_files = sorted(
             item for item in temporary.rglob("*") if item.is_file()

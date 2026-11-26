@@ -3,7 +3,7 @@
 This pack adds AutoTLDR's MCP server to PanCode. It serves one tool,
 `autotldr_summarize`, which reads local files and directories and returns what
 they mean with every claim addressed back to its source. AutoTLDR and this pack
-are MIT licensed.
+are licensed under the Apache License 2.0.
 
 ## Install
 
@@ -35,7 +35,7 @@ server from outside a session.
 
 ## Launch and pin
 
-The server starts as `uvx --from autotldr==0.2.1 autotldr-mcp`. The exact version
+The server starts as `uvx --from autotldr==0.2.2 autotldr-mcp`. The exact version
 pins what uv is asked to install, not the bytes PyPI serves for it. The first
 launch downloads the package from PyPI, so it needs network access, and `uvx` must
 be on `PATH`.
@@ -58,7 +58,7 @@ version: 1
 servers:
   - id: autotldr-project
     command: uvx
-    args: [--from, "autotldr==0.2.1", autotldr-mcp, --root, /path/to/project, --refuse-hidden-sources]
+    args: [--from, "autotldr==0.2.2", autotldr-mcp, --root, /path/to/project, --refuse-hidden-sources]
     timeoutMs: 600000
     toolActionClasses:
       autotldr_summarize: read
@@ -100,7 +100,7 @@ Approving it again without `--network` drops the grant.
 The pack installs AutoTLDR without extras: the base package uses the Python
 standard library only. A file whose format needs an extra answers
 `MISSING_OPTIONAL_DEPENDENCY` and names the extra. To add one, declare the server
-in your user `mcp.yaml` as above with `--from "autotldr[pdf]==0.2.1"` (or `office`,
+in your user `mcp.yaml` as above with `--from "autotldr[pdf]==0.2.2"` (or `office`,
 `structured`, `code`, `web`, `data`, `all`). The `code` extra has wheels for
 Python 3.12 only, so add `--python`, `"3.12"` before `--from` when you use it. The
 `pdf` extra brings PyMuPDF, which is licensed AGPL.
